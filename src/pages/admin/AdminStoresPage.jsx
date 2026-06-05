@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Building2, MapPin, Phone, Store as StoreIcon } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { storeService } from '../../services/storeService';
+import { Edit, Ban } from 'lucide-react';
 
 const initialForm = {
   store_name: '',
@@ -191,10 +192,10 @@ export default function AdminStoresPage() {
       </div>
 
       <div className="metrics-grid">
-        <SummaryCard icon={StoreIcon} label="Stores" value={stores.length} caption="This page" />
-        <SummaryCard icon={Building2} label="Active" value={summary.active} caption="This page" />
-        <SummaryCard icon={MapPin} label="Inactive" value={summary.inactive} caption="This page" />
-        <SummaryCard icon={Phone} label="Currencies" value={summary.currencies} caption="This page" />
+        <SummaryCard icon={StoreIcon} label="Stores" value={stores.length}  />
+        <SummaryCard icon={Building2} label="Active" value={summary.active}  />
+        <SummaryCard icon={MapPin} label="Inactive" value={summary.inactive} />
+        <SummaryCard icon={Phone} label="Currencies" value={summary.currencies} />
       </div>
 
       <div className="dashboard-grid two-wide">
@@ -355,17 +356,27 @@ export default function AdminStoresPage() {
                         </span>
                       </td>
                       <td>
-                        <div className="row-actions compact">
-                          <button className="ghost-button" onClick={() => handleEdit(store)}>
-                            Edit
-                          </button>
-                          <button
-                            className="ghost-button danger"
-                            onClick={() => handleDelete(store.store_id)}
-                          >
-                            Deactivate
-                          </button>
-                        </div>
+<div className="row-actions compact">
+  {/* Edit Store Button */}
+  <button 
+    type="button"
+    className="ghost-button" 
+    onClick={() => handleEdit(store)}
+    title="Edit"
+  >
+    <Edit size={16} />
+  </button>
+
+  {/* Deactivate Store Button */}
+  <button
+    type="button"
+    className="ghost-button danger"
+    onClick={() => handleDelete(store.store_id)}
+    title="Deactivate"
+  >
+    <Ban size={16} />
+  </button>
+</div>
                       </td>
                     </tr>
                   ))

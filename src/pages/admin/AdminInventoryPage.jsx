@@ -1,8 +1,10 @@
 import { Edit, Plus, Search, Trash2, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { inventoryService } from '../../services/inventoryService';
 import { productService } from '../../services/productService';
 import { useStore } from '../../contexts/StoreContext';
+
+const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
 
 const initialForm = {
   product_id: '',
@@ -11,11 +13,69 @@ const initialForm = {
   reorder_level: 0,
 };
 
+const emptyPagination = {
+  data: [],
+  current_page: 1,
+  last_page: 1,
+  per_page: 10,
+  total: 0,
+  from: null,
+  to: null,
+};
+
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
   if (Array.isArray(res?.data)) return res.data;
   if (Array.isArray(res)) return res;
   return [];
+};
+
+const extractPagination = (response) => {
+  const payload = response?.data ?? response ?? {};
+
+  if (Array.isArray(payload?.data)) {
+    const meta = payload?.meta ?? {};
+    const currentPage = Number(meta.current_page ?? 1);
+    const perPage = Number(meta.per_page ?? payload.data.length ?? 10);
+    const total = Number(meta.total ?? payload.data.length ?? 0);
+    const lastPage =
+      Number(meta.last_page ?? Math.max(1, Math.ceil(total / Math.max(perPage, 1)))) || 1;
+
+    return {
+      data: payload.data,
+      current_page: currentPage,
+      last_page: lastPage,
+      per_page: perPage,
+      total,
+      from: meta.from ?? (total ? (currentPage - 1) * perPage + 1 : null),
+      to: meta.to ?? (total ? Math.min(currentPage * perPage, total) : null),
+    };
+  }
+
+  if (Array.isArray(payload)) {
+    return {
+      data: payload,
+      current_page: 1,
+      last_page: 1,
+      per_page: payload.length,
+      total: payload.length,
+      from: payload.length ? 1 : null,
+      to: payload.length || null,
+    };
+  }
+
+  return emptyPagination;
+};
+
+const useDebouncedValue = (value, delay = 350) => {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value, delay));
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+
+  return debounced;
 };
 
 const getInventoryStatus = (row) => {
@@ -48,14 +108,33 @@ export default function AdminInventoryPage() {
   const [rows, setRows] = useState([]);
   const [historyRows, setHistoryRows] = useState([]);
   const [products, setProducts] = useState([]);
+
+  const [inventoryPagination, setInventoryPagination] = useState(emptyPagination);
+  const [historyPagination, setHistoryPagination] = useState(emptyPagination);
+
+  const [inventoryPage, setInventoryPage] = useState(1);
+  const [historyPage, setHistoryPage] = useState(1);
+
+  const [pageSize, setPageSize] = useState(5);
+  const [historyPageSize, setHistoryPageSize] = useState(10);
+
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [productsLoading, setProductsLoading] = useState(false);
+
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const debouncedSearch = useDebouncedValue(search, 300);
+
+  const inventoryRequestRef = useRef(0);
+  const historyRequestRef = useRef(0);
+  const productsRequestRef = useRef(0);
 
   const resetForm = () => {
     setForm(initialForm);
@@ -63,45 +142,128 @@ export default function AdminInventoryPage() {
     setError('');
   };
 
-  const load = async () => {
+  const loadProducts = useCallback(async () => {
     if (!storeId) {
-      setRows([]);
       setProducts([]);
-      setHistoryRows([]);
-      setLoading(false);
-      setHistoryLoading(false);
       return;
     }
 
-    setLoading(true);
-    setHistoryLoading(true);
-    setError('');
+    const requestId = ++productsRequestRef.current;
+    setProductsLoading(true);
 
     try {
-      const [inventoryRes, productsRes, historyRes] = await Promise.all([
-        inventoryService.list({ store_id: storeId, per_page:5 }),
-        productService.list({ store_id: storeId, per_page:10 }),
-        inventoryService.history({ store_id: storeId, per_page:5 }),
-      ]);
+      const productsRes = await productService.list({
+        store_id: storeId,
+        per_page: 100,
+      });
 
-      setRows(extractList(inventoryRes));
+      if (requestId !== productsRequestRef.current) return;
       setProducts(extractList(productsRes));
-      setHistoryRows(extractList(historyRes));
     } catch (err) {
-      setError(err?.message || 'Unable to load inventory.');
-      setRows([]);
+      if (requestId !== productsRequestRef.current) return;
       setProducts([]);
-      setHistoryRows([]);
+      setError(err?.response?.data?.message || err?.message || 'Unable to load products.');
     } finally {
-      setLoading(false);
-      setHistoryLoading(false);
+      if (requestId === productsRequestRef.current) {
+        setProductsLoading(false);
+      }
     }
-  };
+  }, [storeId]);
+
+  const loadInventory = useCallback(
+    async (targetPage = inventoryPage, keyword = debouncedSearch, targetPageSize = pageSize) => {
+      if (!storeId) {
+        setRows([]);
+        setInventoryPagination(emptyPagination);
+        return;
+      }
+
+      const requestId = ++inventoryRequestRef.current;
+      setLoading(true);
+
+      try {
+        const inventoryRes = await inventoryService.list({
+          store_id: storeId,
+          page: targetPage,
+          per_page: targetPageSize,
+          ...(keyword ? { search: keyword } : {}),
+        });
+
+        if (requestId !== inventoryRequestRef.current) return;
+
+        const parsed = extractPagination(inventoryRes);
+        setRows(parsed.data || []);
+        setInventoryPagination(parsed);
+      } catch (err) {
+        if (requestId !== inventoryRequestRef.current) return;
+
+        setRows([]);
+        setInventoryPagination(emptyPagination);
+        setError(err?.response?.data?.message || err?.message || 'Unable to load inventory.');
+      } finally {
+        if (requestId === inventoryRequestRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [storeId, inventoryPage, debouncedSearch, pageSize]
+  );
+
+  const loadHistory = useCallback(
+    async (
+      targetPage = historyPage,
+      keyword = debouncedSearch,
+      targetPageSize = historyPageSize
+    ) => {
+      if (!storeId) {
+        setHistoryRows([]);
+        setHistoryPagination(emptyPagination);
+        return;
+      }
+
+      const requestId = ++historyRequestRef.current;
+      setHistoryLoading(true);
+
+      try {
+        const historyRes = await inventoryService.history({
+          store_id: storeId,
+          page: targetPage,
+          per_page: targetPageSize,
+          ...(keyword ? { search: keyword } : {}),
+        });
+
+        if (requestId !== historyRequestRef.current) return;
+
+        const parsed = extractPagination(historyRes);
+        setHistoryRows(parsed.data || []);
+        setHistoryPagination(parsed);
+      } catch (err) {
+        if (requestId !== historyRequestRef.current) return;
+
+        setHistoryRows([]);
+        setHistoryPagination(emptyPagination);
+        setError(
+          err?.response?.data?.message || err?.message || 'Unable to load inventory history.'
+        );
+      } finally {
+        if (requestId === historyRequestRef.current) {
+          setHistoryLoading(false);
+        }
+      }
+    },
+    [storeId, historyPage, debouncedSearch, historyPageSize]
+  );
 
   useEffect(() => {
     setRows([]);
-    setProducts([]);
     setHistoryRows([]);
+    setProducts([]);
+    setInventoryPagination(emptyPagination);
+    setHistoryPagination(emptyPagination);
+    setInventoryPage(1);
+    setHistoryPage(1);
+    setPageSize(5);
+    setHistoryPageSize(10);
     setSearch('');
     setShowModal(false);
     resetForm();
@@ -109,41 +271,22 @@ export default function AdminInventoryPage() {
     if (!storeId) {
       setLoading(false);
       setHistoryLoading(false);
+      setProductsLoading(false);
       return;
     }
 
-    load();
-  }, [storeId]);
+    loadProducts();
+  }, [storeId, loadProducts]);
 
-  const filteredRows = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-    if (!keyword) return rows;
+  useEffect(() => {
+    if (!storeId) return;
+    loadInventory(inventoryPage, debouncedSearch, pageSize);
+  }, [storeId, inventoryPage, debouncedSearch, pageSize, loadInventory]);
 
-    return rows.filter((row) => {
-      const name = row?.product?.product_name?.toLowerCase() || '';
-      const sku = row?.product?.sku?.toLowerCase() || '';
-      const batch = row?.batch_no?.toLowerCase() || '';
-      return name.includes(keyword) || sku.includes(keyword) || batch.includes(keyword);
-    });
-  }, [rows, search]);
-
-  const filteredHistoryRows = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-    if (!keyword) return historyRows;
-
-    return historyRows.filter((row) => {
-      const name = row?.product?.product_name?.toLowerCase() || '';
-      const sku = row?.product?.sku?.toLowerCase() || '';
-      const batch = row?.batch_no?.toLowerCase() || '';
-      const reference = row?.reference?.toLowerCase() || '';
-      return (
-        name.includes(keyword) ||
-        sku.includes(keyword) ||
-        batch.includes(keyword) ||
-        reference.includes(keyword)
-      );
-    });
-  }, [historyRows, search]);
+  useEffect(() => {
+    if (!storeId) return;
+    loadHistory(historyPage, debouncedSearch, historyPageSize);
+  }, [storeId, historyPage, debouncedSearch, historyPageSize, loadHistory]);
 
   const lowStockCount = useMemo(
     () => rows.filter((row) => getInventoryStatus(row).tone === 'low').length,
@@ -183,9 +326,19 @@ export default function AdminInventoryPage() {
 
       setShowModal(false);
       resetForm();
-      await load();
+
+      const nextInventoryPage = 1;
+      const nextHistoryPage = 1;
+
+      setInventoryPage(nextInventoryPage);
+      setHistoryPage(nextHistoryPage);
+
+      await Promise.all([
+        loadInventory(nextInventoryPage, debouncedSearch, pageSize),
+        loadHistory(nextHistoryPage, debouncedSearch, historyPageSize),
+      ]);
     } catch (err) {
-      setError(err?.message || 'Unable to save inventory.');
+      setError(err?.response?.data?.message || err?.message || 'Unable to save inventory.');
     } finally {
       setSubmitting(false);
     }
@@ -207,22 +360,42 @@ export default function AdminInventoryPage() {
     if (!window.confirm('Delete this inventory row? Quantity must be zero.')) return;
 
     try {
+      setError('');
       await inventoryService.remove(inventoryId);
-      await load();
+
+      const nextPage =
+        rows.length === 1 && inventoryPagination.current_page > 1
+          ? inventoryPagination.current_page - 1
+          : inventoryPagination.current_page;
+
+      setInventoryPage(nextPage);
+      await loadInventory(nextPage, debouncedSearch, pageSize);
     } catch (err) {
-      setError(err?.message || 'Unable to delete inventory.');
+      setError(err?.response?.data?.message || err?.message || 'Unable to delete inventory.');
     }
   };
 
   return (
     <>
       <section className="inventory-page stack-lg">
-        <div className="catalog-hero" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-          <div className="catalog-hero-copy" style={{ display: 'flex', flexDirection: 'column' }}>
+        <div
+          className="catalog-hero"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            width: '100%',
+          }}
+        >
+          <div
+            className="catalog-hero-copy"
+            style={{ display: 'flex', flexDirection: 'column' }}
+          >
             <h2 className="catalog-title">Inventory</h2>
             <p className="catalog-subtitle">
-              {rows.length} stock lines
-              {lowStockCount ? ` • ${lowStockCount} low stock` : ''}
+              {inventoryPagination.total} stock lines
+              {lowStockCount ? ` • ${lowStockCount} low stock on this page` : ''}
+              {loading && rows.length ? ' • refreshing...' : ''}
             </p>
           </div>
 
@@ -230,8 +403,13 @@ export default function AdminInventoryPage() {
             type="button"
             className="ghost-button"
             onClick={openCreateModal}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-            disabled={!storeId}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              whiteSpace: 'nowrap',
+            }}
+            disabled={!storeId || productsLoading}
           >
             <Plus size={16} />
             <span>Add stock line</span>
@@ -248,9 +426,32 @@ export default function AdminInventoryPage() {
               type="text"
               placeholder="Search product, SKU, batch"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setInventoryPage(1);
+                setHistoryPage(1);
+              }}
               disabled={!storeId}
             />
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="muted">Show</span>
+            <select
+              className="select-input"
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setInventoryPage(1);
+              }}
+              disabled={!storeId}
+            >
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
           </label>
 
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
@@ -275,14 +476,18 @@ export default function AdminInventoryPage() {
               <tbody>
                 {!storeId ? (
                   <tr>
-                    <td colSpan="6" className="catalog-empty-cell">Select a store first.</td>
+                    <td colSpan="6" className="catalog-empty-cell">
+                      Select a store first.
+                    </td>
                   </tr>
-                ) : loading ? (
+                ) : loading && !rows.length ? (
                   <tr>
-                    <td colSpan="6" className="catalog-empty-cell">Loading...</td>
+                    <td colSpan="6" className="catalog-empty-cell">
+                      Loading...
+                    </td>
                   </tr>
-                ) : filteredRows.length ? (
-                  filteredRows.map((row) => {
+                ) : rows.length ? (
+                  rows.map((row) => {
                     const status = getInventoryStatus(row);
 
                     return (
@@ -327,17 +532,100 @@ export default function AdminInventoryPage() {
                   })
                 ) : (
                   <tr>
-                    <td colSpan="6" className="catalog-empty-cell">No inventory rows found.</td>
+                    <td colSpan="6" className="catalog-empty-cell">
+                      No inventory rows found.
+                    </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+
+          {storeId ? (
+            <div
+              className="row-actions"
+              style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
+            >
+              <span className="muted">
+                {inventoryPagination.from && inventoryPagination.to
+                  ? `Showing ${inventoryPagination.from}-${inventoryPagination.to} of ${inventoryPagination.total}`
+                  : `Page ${inventoryPagination.current_page} of ${inventoryPagination.last_page}`}
+              </span>
+
+              <div className="row-actions compact">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setInventoryPage(Math.max(inventoryPagination.current_page - 1, 1))
+                  }
+                  disabled={loading || !inventoryPagination.current_page || inventoryPagination.current_page <= 1}
+                >
+                  Previous
+                </button>
+
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setInventoryPage(
+                      Math.min(
+                        inventoryPagination.current_page + 1,
+                        inventoryPagination.last_page
+                      )
+                    )
+                  }
+                  disabled={
+                    loading ||
+                    !inventoryPagination.last_page ||
+                    inventoryPagination.current_page >= inventoryPagination.last_page
+                  }
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          ) : null}
         </article>
 
         <article className="catalog-table-card">
-          <div className="catalog-hero-copy" style={{ marginBottom: 12 }}>
-            <h3 className="catalog-title" style={{ fontSize: '1.05rem' }}>Inventory history</h3>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 12,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div className="catalog-hero-copy">
+              <h3 className="catalog-title" style={{ fontSize: '1.05rem' }}>
+                Inventory history
+              </h3>
+              <p className="catalog-subtitle">
+                {historyLoading && historyRows.length ? 'Refreshing history...' : ''}
+              </p>
+            </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="muted">Show</span>
+              <select
+                className="select-input"
+                value={historyPageSize}
+                onChange={(e) => {
+                  setHistoryPageSize(Number(e.target.value));
+                  setHistoryPage(1);
+                }}
+                disabled={!storeId}
+              >
+                {PAGE_SIZE_OPTIONS.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           <div className="table-wrap">
@@ -358,14 +646,18 @@ export default function AdminInventoryPage() {
               <tbody>
                 {!storeId ? (
                   <tr>
-                    <td colSpan="8" className="catalog-empty-cell">Select a store first.</td>
+                    <td colSpan="8" className="catalog-empty-cell">
+                      Select a store first.
+                    </td>
                   </tr>
-                ) : historyLoading ? (
+                ) : historyLoading && !historyRows.length ? (
                   <tr>
-                    <td colSpan="8" className="catalog-empty-cell">Loading history...</td>
+                    <td colSpan="8" className="catalog-empty-cell">
+                      Loading history...
+                    </td>
                   </tr>
-                ) : filteredHistoryRows.length ? (
-                  filteredHistoryRows.map((row) => (
+                ) : historyRows.length ? (
+                  historyRows.map((row) => (
                     <tr key={row.inventory_history_id}>
                       <td>{row.created_at ? new Date(row.created_at).toLocaleString() : '-'}</td>
                       <td>
@@ -376,7 +668,9 @@ export default function AdminInventoryPage() {
                       </td>
                       <td>{row.batch_no || '—'}</td>
                       <td>
-                        <span className={`history-change-pill ${getHistoryTone(row.quantity_changed)}`}>
+                        <span
+                          className={`history-change-pill ${getHistoryTone(row.quantity_changed)}`}
+                        >
                           {formatSignedQty(row.quantity_changed)}
                         </span>
                       </td>
@@ -386,19 +680,73 @@ export default function AdminInventoryPage() {
                       <td>
                         <div className="catalog-item-copy">
                           <strong>{row.reference || '—'}</strong>
-                          <span>{row.user?.full_name || row.user?.name || row.user?.email || 'System'}</span>
+                          <span>
+                            {row.user?.full_name ||
+                              row.user?.name ||
+                              row.user?.email ||
+                              'System'}
+                          </span>
                         </div>
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="8" className="catalog-empty-cell">No inventory history found.</td>
+                    <td colSpan="8" className="catalog-empty-cell">
+                      No inventory history found.
+                    </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+
+          {storeId ? (
+            <div
+              className="row-actions"
+              style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
+            >
+              <span className="muted">
+                {historyPagination.from && historyPagination.to
+                  ? `Showing ${historyPagination.from}-${historyPagination.to} of ${historyPagination.total}`
+                  : `Page ${historyPagination.current_page} of ${historyPagination.last_page}`}
+              </span>
+
+              <div className="row-actions compact">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setHistoryPage(Math.max(historyPagination.current_page - 1, 1))
+                  }
+                  disabled={
+                    historyLoading ||
+                    !historyPagination.current_page ||
+                    historyPagination.current_page <= 1
+                  }
+                >
+                  Previous
+                </button>
+
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setHistoryPage(
+                      Math.min(historyPagination.current_page + 1, historyPagination.last_page)
+                    )
+                  }
+                  disabled={
+                    historyLoading ||
+                    !historyPagination.last_page ||
+                    historyPagination.current_page >= historyPagination.last_page
+                  }
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          ) : null}
         </article>
       </section>
 
@@ -411,12 +759,16 @@ export default function AdminInventoryPage() {
                 <p className="muted">
                   {editingId
                     ? 'Update quantity, reorder threshold, and batch number.'
-                    : 'Each stock receipt creates a new FIFO inventory layer.'
-}
+                    : 'Each stock receipt creates a new FIFO inventory layer.'}
                 </p>
               </div>
 
-              <button type="button" className="icon-button" onClick={closeModal} disabled={submitting}>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={closeModal}
+                disabled={submitting}
+              >
                 <X size={18} />
               </button>
             </div>
@@ -430,9 +782,11 @@ export default function AdminInventoryPage() {
                     value={form.product_id}
                     onChange={(e) => setForm({ ...form, product_id: e.target.value })}
                     required
-                    disabled={Boolean(editingId)}
+                    disabled={Boolean(editingId) || productsLoading}
                   >
-                    <option value="">Select product</option>
+                    <option value="">
+                      {productsLoading ? 'Loading products...' : 'Select product'}
+                    </option>
                     {products.map((product) => (
                       <option key={product.product_id} value={product.product_id}>
                         {product.product_name} ({product.sku})
@@ -478,7 +832,12 @@ export default function AdminInventoryPage() {
                 {error ? <p className="form-error span-2">{error}</p> : null}
 
                 <div className="catalog-modal-actions span-2">
-                  <button type="button" className="ghost-button" onClick={closeModal} disabled={submitting}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={closeModal}
+                    disabled={submitting}
+                  >
                     Cancel
                   </button>
                   <button className="catalog-primary-btn" type="submit" disabled={submitting}>

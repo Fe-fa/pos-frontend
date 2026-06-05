@@ -169,36 +169,6 @@ export default function AdminSettingsPage() {
 
   return (
     <section className="stack-lg admin-settings-page">
-      <article className="card hero-card compact-hero settings-hero">
-        <div className="settings-hero__content">
-          <div>
-            <span className="settings-hero__eyebrow">Administration</span>
-            <h2 className="settings-hero__title">Store settings & document numbering</h2>
-            <p className="settings-hero__subtitle">
-              Configure POS behavior, receipt / invoice visibility, messaging, paper options and numbering rules for{' '}
-              <strong>{currentStore?.store_name}</strong>.
-            </p>
-          </div>
-
-          <div className="settings-hero__meta">
-            <div className="settings-hero__pill">
-              <strong>Role</strong>
-              <span>{user?.role || 'Unknown'}</span>
-            </div>
-
-            <div className="settings-hero__pill">
-              <strong>Store</strong>
-              <span>{currentStore?.store_name || 'Not selected'}</span>
-            </div>
-
-            <div className="settings-hero__pill">
-              <strong>Status</strong>
-              <span>{loadingSettings ? 'Loading settings...' : 'Ready to edit'}</span>
-            </div>
-          </div>
-        </div>
-      </article>
-
       <div className="dashboard-grid two-wide admin-settings-layout">
         <aside className="card info-panel admin-settings-sidebar">
           <div className="card-header">
@@ -247,13 +217,6 @@ export default function AdminSettingsPage() {
 
           <form className="form-grid two-columns admin-settings-form" onSubmit={handleSubmit}>
             <section className="settings-section span-2">
-              <div className="settings-section__header">
-                <div>
-                  <h4>Store behavior</h4>
-                  <p>Core POS defaults that affect daily operations for this store.</p>
-                </div>
-              </div>
-
               <div className="settings-input-grid">
                 <label>
                   Default VAT rate (%)

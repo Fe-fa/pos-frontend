@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { X, Edit, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { customerService } from '../../services/customerService';
 import { currency } from '../../utils/helpers';
@@ -248,22 +248,27 @@ export default function AdminCustomersPage() {
                       </td>
                       <td>{currency(customer.current_balance, currentStore?.currency)}</td>
                       <td>
-                        <div className="row-actions compact">
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => handleEdit(customer)}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost-button danger"
-                            onClick={() => handleDelete(customer.customer_id)}
-                          >
-                            Delete
-                          </button>
-                        </div>
+<div className="row-actions compact">
+  {/* Edit Customer Button */}
+  <button
+    type="button"
+    className="ghost-button"
+    onClick={() => handleEdit(customer)}
+    title="Edit"
+  >
+    <Edit size={16} />
+  </button>
+
+  {/* Delete Customer Button */}
+  <button
+    type="button"
+    className="ghost-button danger"
+    onClick={() => handleDelete(customer.customer_id)}
+    title="Delete"
+  >
+    <Trash2 size={16} />
+  </button>
+</div>
                       </td>
                     </tr>
                   ))

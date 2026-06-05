@@ -1,4 +1,6 @@
 import {
+  ChevronLeft,
+  ChevronRight,
   CreditCard,
   FolderClock,
   Minus,
@@ -23,28 +25,17 @@ import { currency, formatDateTime } from '../../utils/helpers';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { mergeStoreSettings } from '../../utils/storeSettings';
 
-const PRODUCTS_PER_PAGE = 12;
-const SEARCH_DEBOUNCE_MS = 350;
+const SEARCH_DEBOUNCE_MS = 300;
+const PRODUCT_CACHE_TTL_MS = 60_000;
+const CATEGORY_CACHE_TTL_MS = 60_000;
+const FALLBACK_PER_PAGE = 12;
 
-const paymentMethods = [
-  {
-    key: 'cash',
-    title: 'CASH',
-    description: 'Receive cash and enter tendered amount',
-    icon: Wallet,
-  },
-  {
-    key: 'mpesa',
-    title: 'MPESA',
-    description: 'Enter phone number and transaction code',
-    icon: Smartphone,
-  },
-  {
-    key: 'card',
-    title: 'CARD',
-    description: 'Enter card reference',
-    icon: CreditCard,
-  },
+const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
+
+const PAYMENT_METHODS = [
+  { key: 'cash', title: 'CASH', description: 'Receive cash and enter tendered amount', icon: Wallet },
+  { key: 'mpesa', title: 'MPESA', description: 'Enter phone number and transaction code', icon: Smartphone },
+  { key: 'card', title: 'CARD', description: 'Enter card reference', icon: CreditCard },
 ];
 
 const extractList = (res) => {
@@ -54,17 +45,13 @@ const extractList = (res) => {
   return [];
 };
 
-const extractPaginator = (res) => {
-  if (res?.data && !Array.isArray(res.data) && typeof res.data === 'object') {
-    return res.data;
-  }
+const extractMeta = (res) => res?.meta || res?.data?.meta || {};
 
-  if (res && !Array.isArray(res) && typeof res === 'object' && Array.isArray(res.data)) {
-    return res;
-  }
+const getCategoryId = (category) =>
+  category?.category_id ?? category?.id ?? category?.value ?? null;
 
-  return null;
-};
+const getCustomerId = (customer) =>
+  customer?.customer_id ?? customer?.id ?? null;
 
 const getProductImage = (product) => {
   const rawPath =
@@ -78,9 +65,7 @@ const getProductImage = (product) => {
     '';
 
   if (!rawPath) return '';
-  if (rawPath.startsWith('http') || rawPath.startsWith('data:')) {
-    return rawPath;
-  }
+  if (rawPath.startsWith('http') || rawPath.startsWith('data:')) return rawPath;
 
   const cleanPath = rawPath.startsWith('/') ? rawPath.substring(1) : rawPath;
   return `${IMAGE_BASE_URL}${cleanPath}`;
@@ -96,17 +81,53 @@ const getItemTotal = (item) =>
 
 const isTypingElement = (target) => {
   if (!(target instanceof HTMLElement)) return false;
-
   const tag = target.tagName;
   return ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || target.isContentEditable;
 };
 
 const isHotkeyBlockedElement = (target) => {
   if (!(target instanceof HTMLElement)) return false;
-
   const tag = target.tagName;
   return ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(tag) || target.isContentEditable;
 };
+
+const buildPageInfo = (meta, items, fallbackPage = 1) => {
+  const currentPage = Number(meta?.current_page || fallbackPage);
+  const lastPage = Number(meta?.last_page || 1);
+  const total = Number(meta?.total || items.length);
+  const perPage = Number(meta?.per_page || items.length || FALLBACK_PER_PAGE);
+  const from = meta?.from ?? (items.length ? (currentPage - 1) * perPage + 1 : 0);
+  const to = meta?.to ?? (items.length ? from + items.length - 1 : 0);
+
+  return {
+    currentPage,
+    lastPage,
+    hasNextPage: currentPage < lastPage,
+    hasPrevPage: currentPage > 1,
+    from,
+    to,
+    total,
+    perPage,
+  };
+};
+
+const emptyPageInfo = () => ({
+  currentPage: 1,
+  lastPage: 1,
+  hasNextPage: false,
+  hasPrevPage: false,
+  from: 0,
+  to: 0,
+  total: 0,
+  perPage: FALLBACK_PER_PAGE,
+});
+
+const normalizeCategoryIds = (ids) =>
+  ids
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+const buildCategoryScopeKey = (mode, ids) => `${mode}:${ids.join(',')}`;
 
 export default function CashierPosPage() {
   const { user } = useAuth();
@@ -114,12 +135,24 @@ export default function CashierPosPage() {
 
   const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
   const printSettings = mergeStoreSettings(currentStore);
+
+  /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
+
+  const categoryCacheRef = useRef(new Map());
+  const categoryRequestIdRef = useRef(0);
+
   const productCacheRef = useRef(new Map());
   const productRequestIdRef = useRef(0);
+
   const lastProductFilterRef = useRef('');
+  const prefetchedKeysRef = useRef(new Set());
+  const bootstrappedRef = useRef(false);
+  const bootstrapRequestId = useRef(0);
 
   const [categories, setCategories] = useState([]);
+  const [categoryPageInfo, setCategoryPageInfo] = useState(emptyPageInfo());
+
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [drafts, setDrafts] = useState([]);
@@ -130,14 +163,7 @@ export default function CashierPosPage() {
   const [draftSearch, setDraftSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
 
-  const [productPageInfo, setProductPageInfo] = useState({
-    currentPage: 1,
-    hasNextPage: false,
-    hasPrevPage: false,
-    from: 0,
-    to: 0,
-    total: null,
-  });
+  const [productPageInfo, setProductPageInfo] = useState(emptyPageInfo());
 
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [notes, setNotes] = useState('');
@@ -155,6 +181,7 @@ export default function CashierPosPage() {
   const [showDraftModal, setShowDraftModal] = useState(false);
 
   const [catalogLoading, setCatalogLoading] = useState(true);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
   const [productsLoading, setProductsLoading] = useState(false);
   const [draftsLoading, setDraftsLoading] = useState(false);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -163,16 +190,51 @@ export default function CashierPosPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  /* --- derived / memos ------------------------------------------------ */
+  const visibleCategories = categories;
+
+  const visibleCategoryIds = useMemo(
+    () =>
+      normalizeCategoryIds(
+        visibleCategories
+          .map((category) => getCategoryId(category))
+          .filter((id) => id != null)
+      ),
+    [visibleCategories]
+  );
+
+  const effectiveCategoryIds = useMemo(() => {
+    if (activeCategory === 'all') return visibleCategoryIds;
+    return normalizeCategoryIds([activeCategory]);
+  }, [activeCategory, visibleCategoryIds]);
+
+  const effectiveCategoryScopeKey = useMemo(() => {
+    if (activeCategory === 'all') {
+      return buildCategoryScopeKey('visible-page', effectiveCategoryIds);
+    }
+    return buildCategoryScopeKey('single', effectiveCategoryIds);
+  }, [activeCategory, effectiveCategoryIds]);
+
+  const currentFilterSignature = useMemo(
+    () =>
+      JSON.stringify({
+        storeId: String(storeId || ''),
+        categoryScope: effectiveCategoryScopeKey,
+        search: debouncedSearch.trim().toLowerCase(),
+      }),
+    [storeId, effectiveCategoryScopeKey, debouncedSearch]
+  );
+
+  const canPrevCategory = categoryPageInfo.hasPrevPage;
+  const canNextCategory = categoryPageInfo.hasNextPage;
+
+  /* --- helpers -------------------------------------------------------- */
   const focusSearchInput = useCallback((selectText = false) => {
     window.requestAnimationFrame(() => {
       const input = searchInputRef.current;
       if (!input) return;
-
       input.focus();
-
-      if (selectText && typeof input.select === 'function') {
-        input.select();
-      }
+      if (selectText && typeof input.select === 'function') input.select();
     });
   }, []);
 
@@ -186,7 +248,7 @@ export default function CashierPosPage() {
     [user]
   );
 
-  const resetPaymentState = (total = '') => {
+  const resetPaymentState = useCallback((total = '') => {
     setPaymentMethod('');
     setAmountReceived(total ? String(total) : '');
     setAmountTendered('');
@@ -194,219 +256,311 @@ export default function CashierPosPage() {
     setMpesaCode('');
     setCardReference('');
     setCardHolder('');
-  };
+  }, []);
 
-  const resetSale = () => {
+  const resetSale = useCallback(() => {
     setBilling(null);
     setSelectedCustomerId('');
     setNotes('');
     resetPaymentState('');
     setShowPaymentModal(false);
-  };
+  }, [resetPaymentState]);
 
-  const mergeDraftPreview = (billingRecord) => {
+  const resetProductState = useCallback(() => {
+    setProducts([]);
+    setCurrentPage(1);
+    setProductPageInfo(emptyPageInfo());
+    productCacheRef.current.clear();
+    prefetchedKeysRef.current.clear();
+    lastProductFilterRef.current = '';
+  }, []);
+
+  const resetCategoryState = useCallback(() => {
+    setCategories([]);
+    setCategoryPageInfo(emptyPageInfo());
+    categoryCacheRef.current.clear();
+  }, []);
+
+  const mergeDraftPreview = useCallback((billingRecord) => {
     if (!billingRecord?.billing_id) return;
-
     setDrafts((prev) => {
       const withoutCurrent = prev.filter(
         (item) => String(item.billing_id) !== String(billingRecord.billing_id)
       );
-
-      if (!billingRecord.is_draft) {
-        return withoutCurrent;
-      }
-
+      if (!billingRecord.is_draft) return withoutCurrent;
       return [billingRecord, ...withoutCurrent].sort(
         (a, b) => Number(b.billing_id || 0) - Number(a.billing_id || 0)
       );
     });
-  };
+  }, []);
 
-  const removeDraftPreview = (billingId) => {
+  const removeDraftPreview = useCallback((billingId) => {
     setDrafts((prev) => prev.filter((item) => String(item.billing_id) !== String(billingId)));
-  };
+  }, []);
 
   const deleteBillingRecord = async (billingId) => {
-    if (typeof billingService.destroy === 'function') {
-      return billingService.destroy(billingId);
-    }
-
-    if (typeof billingService.delete === 'function') {
-      return billingService.delete(billingId);
-    }
-
-    if (typeof billingService.remove === 'function') {
-      return billingService.remove(billingId);
-    }
-
+    if (typeof billingService.destroy === 'function') return billingService.destroy(billingId);
+    if (typeof billingService.delete === 'function') return billingService.delete(billingId);
+    if (typeof billingService.remove === 'function') return billingService.remove(billingId);
     throw new Error('Delete billing method is not implemented in billingService.');
   };
 
+  /* =====================================================================
+     CATEGORY PAGE FETCHING (server-side pagination)
+     ===================================================================== */
+  const buildCategoryCacheKey = useCallback(
+    (page) =>
+      JSON.stringify({
+        storeId: String(storeId || ''),
+        page: Number(page || 1),
+      }),
+    [storeId]
+  );
 
-  
-const loadStaticData = useCallback(async () => {
-  if (!storeId) return;
-
-  setCatalogLoading(true);
-  setError('');
-
-  // 💡 A local flag to track if this specific hook instance is still active
-  let isMounted = true;
-
-  try {
-    // 1. Fetch categories cleanly
-    const categoriesRes = await categoryService.list({
-      store_id: Number(storeId),
-      per_page: 12,
-    });
-
-    // 2. Fetch customers/products sequentially right after
-    const customersRes = await customerService.list({
-      store_id: Number(storeId),
-      per_page: 12,
-    });
-
-    // 💡 Only update React state if the user hasn't navigate away or changed settings
-    if (isMounted) {
-      setCategories(extractList(categoriesRes));
-      setCustomers(extractList(customersRes));
-    }
-
-  } catch (err) {
-    if (!isMounted) return;
-
-    console.error("Intercepted UI Error:", err);
-    setError(
-      `Failed to load catalog: ${
-        err?.response?.data?.message || err?.message || 'Network Error'
-      }`
-    );
-    setCategories([]);
-    setCustomers([]);
-  } finally {
-    if (isMounted) {
-      setCatalogLoading(false);
-    }
-  }
-
-  // Cleanup handler: sets the flag to false if storeId shifts rapidly
-  return () => {
-    isMounted = false;
-  };
-}, [storeId]);
-
-
-
-const loadProducts = useCallback(
-  async (page = 1, { force = false } = {}) => {
-    if (!storeId) return;
-
-    const normalizedSearch = debouncedSearch.trim();
-    const cacheKey = JSON.stringify({
-      storeId: String(storeId),
-      page,
-      category: String(activeCategory),
-      search: normalizedSearch.toLowerCase(),
-    });
-
-    if (!force && productCacheRef.current.has(cacheKey)) {
-      const cached = productCacheRef.current.get(cacheKey);
-      setProducts(cached.items);
-      setProductPageInfo(cached.pageInfo);
-
-      if (page !== cached.pageInfo.currentPage) {
-        setCurrentPage(cached.pageInfo.currentPage);
+  const loadCategoriesPage = useCallback(
+    async (page = 1, { force = false, silent = false } = {}) => {
+      if (!storeId) {
+        setCategories([]);
+        setCategoryPageInfo(emptyPageInfo());
+        return { items: [], pageInfo: emptyPageInfo() };
       }
-      return;
+
+      const cacheKey = buildCategoryCacheKey(page);
+      const cached = categoryCacheRef.current.get(cacheKey);
+      const fresh = cached && Date.now() - cached.ts < CATEGORY_CACHE_TTL_MS;
+
+      if (!force && cached) {
+        setCategories(cached.items);
+        setCategoryPageInfo(cached.pageInfo);
+        if (fresh) return { items: cached.items, pageInfo: cached.pageInfo };
+      }
+
+      if (!silent) setCategoriesLoading(true);
+      const requestId = ++categoryRequestIdRef.current;
+
+      try {
+        const response = await categoryService.list({
+          store_id: Number(storeId),
+          page,
+        });
+
+        if (requestId !== categoryRequestIdRef.current) {
+          return { items: [], pageInfo: emptyPageInfo() };
+        }
+
+        const items = extractList(response);
+        const meta = extractMeta(response);
+        const pageInfo = buildPageInfo(meta, items, page);
+
+        categoryCacheRef.current.set(cacheKey, {
+          items,
+          pageInfo,
+          ts: Date.now(),
+        });
+
+        setCategories(items);
+        setCategoryPageInfo(pageInfo);
+
+        return { items, pageInfo };
+      } catch (err) {
+        if (requestId === categoryRequestIdRef.current) {
+          setCategories([]);
+          setCategoryPageInfo(emptyPageInfo());
+          if (!silent) {
+            setError(err?.response?.data?.message || err?.message || 'Failed to load categories.');
+          }
+        }
+
+        return { items: [], pageInfo: emptyPageInfo() };
+      } finally {
+        if (!silent && requestId === categoryRequestIdRef.current) {
+          setCategoriesLoading(false);
+        }
+      }
+    },
+    [storeId, buildCategoryCacheKey]
+  );
+
+  /* =====================================================================
+     STATIC DATA (customers only + first category page)
+     ===================================================================== */
+  const loadStaticData = useCallback(async () => {
+    if (!storeId) {
+      return {
+        categories: [],
+        categoryPageInfo: emptyPageInfo(),
+        customers: [],
+      };
     }
 
-    setProductsLoading(true);
-    const requestId = ++productRequestIdRef.current;
+    setCatalogLoading(true);
+    setError('');
 
     try {
+      const [categoryResult, customersRes] = await Promise.all([
+        loadCategoriesPage(1, { force: true, silent: true }),
+        customerService.list({ store_id: Number(storeId), per_page: 100 }),
+      ]);
+
+      const customerList = extractList(customersRes);
+      setCustomers(customerList);
+
+      return {
+        categories: categoryResult.items,
+        categoryPageInfo: categoryResult.pageInfo,
+        customers: customerList,
+      };
+    } catch (err) {
+      console.error('POS catalog load failed:', err);
+      setError(
+        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'}`
+      );
+      setCustomers([]);
+
+      return {
+        categories: [],
+        categoryPageInfo: emptyPageInfo(),
+        customers: [],
+      };
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [storeId, loadCategoriesPage]);
+
+  /* =====================================================================
+     PRODUCTS — cache key + fetch + load
+     ===================================================================== */
+  const buildCacheKey = useCallback(
+    (
+      page,
+      categoryIds = effectiveCategoryIds,
+      scopeKey = effectiveCategoryScopeKey,
+      searchValue = debouncedSearch.trim().toLowerCase()
+    ) =>
+      JSON.stringify({
+        storeId: String(storeId || ''),
+        page: Number(page || 1),
+        categoryScope: scopeKey,
+        categoryIds: normalizeCategoryIds(categoryIds).join(','),
+        search: searchValue,
+      }),
+    [storeId, effectiveCategoryIds, effectiveCategoryScopeKey, debouncedSearch]
+  );
+
+  const fetchProductsPage = useCallback(
+    async (page, categoryIds = effectiveCategoryIds) => {
+      const normalizedCategoryIds = normalizeCategoryIds(categoryIds);
+
+      if (!normalizedCategoryIds.length) {
+        return {
+          items: [],
+          pageInfo: emptyPageInfo(),
+        };
+      }
+
       const params = {
         store_id: Number(storeId),
-        per_page: PRODUCTS_PER_PAGE,
         page,
         is_active: true,
       };
 
-      if (activeCategory !== 'all') {
-        params.category_id = Number(activeCategory);
+      if (normalizedCategoryIds.length === 1) {
+        params.category_id = normalizedCategoryIds[0];
+      } else {
+        params.category_ids = normalizedCategoryIds.join(',');
       }
 
-      if (normalizedSearch) {
-        params.search = normalizedSearch;
-      }
+      const normalizedSearch = debouncedSearch.trim();
+      if (normalizedSearch) params.search = normalizedSearch;
 
       const response = await productService.list(params);
-
-      if (requestId !== productRequestIdRef.current) return;
-
-      // Unpack response objects assuming uniform controller output
-      const meta = response?.meta || response; 
+      const meta = extractMeta(response);
       const items = extractList(response);
+      const pageInfo = buildPageInfo(meta, items, page);
 
-      const nextPage = Number(meta?.current_page || page);
+      return { items, pageInfo };
+    },
+    [storeId, debouncedSearch, effectiveCategoryIds]
+  );
 
-      // 💡 Optimized Simple Paginator Checks:
-      // Reads has_more directly from backend meta or checks next_page_url text values
-      const hasNextPage = typeof meta?.has_more !== 'undefined' 
-        ? Boolean(meta.has_more) 
-        : Boolean(meta?.next_page_url);
+  const loadProducts = useCallback(
+    async (page = 1, { force = false } = {}) => {
+      if (!storeId) return;
 
-      const hasPrevPage = nextPage > 1;
-
-      // Safe bounds calculator without requiring database aggregators
-      const from = items.length ? (nextPage - 1) * PRODUCTS_PER_PAGE + 1 : 0;
-      const to = items.length ? (nextPage - 1) * PRODUCTS_PER_PAGE + items.length : 0;
-
-      const pageInfo = {
-        currentPage: nextPage,
-        hasNextPage,
-        hasPrevPage,
-        from,
-        to,
-        total: null, // 💡 Hard-set to null to completely decouple UI from backend counter queries
-      };
-
-      productCacheRef.current.set(cacheKey, {
-        items,
-        pageInfo,
-      });
-
-      setProducts(items);
-      setProductPageInfo(pageInfo);
-
-      if (nextPage !== page) {
-        setCurrentPage(nextPage);
+      if (!effectiveCategoryIds.length) {
+        setProducts([]);
+        setProductPageInfo(emptyPageInfo());
+        return;
       }
-    } catch (err) {
-      if (requestId !== productRequestIdRef.current) return;
 
-      setError(err?.response?.data?.message || err?.message || 'Failed to load products.');
-      setProducts([]);
-      setProductPageInfo({
-        currentPage: 1,
-        hasNextPage: false,
-        hasPrevPage: false,
-        from: 0,
-        to: 0,
-        total: null,
-      });
-    } finally {
-      if (requestId === productRequestIdRef.current) {
-        setProductsLoading(false);
+      const cacheKey = buildCacheKey(page);
+      const cached = productCacheRef.current.get(cacheKey);
+      const fresh = cached && Date.now() - cached.ts < PRODUCT_CACHE_TTL_MS;
+
+      if (!force && cached) {
+        setProducts(cached.items);
+        setProductPageInfo(cached.pageInfo);
+        if (page !== cached.pageInfo.currentPage) {
+          setCurrentPage(cached.pageInfo.currentPage);
+        }
+        if (fresh) return;
       }
-    }
-  },
-  [storeId, activeCategory, debouncedSearch]
-);
 
+      setProductsLoading(true);
+      const requestId = ++productRequestIdRef.current;
+
+      try {
+        const { items, pageInfo } = await fetchProductsPage(page);
+
+        if (requestId !== productRequestIdRef.current) return;
+
+        productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
+        setProducts(items);
+        setProductPageInfo(pageInfo);
+
+        if (pageInfo.currentPage !== page) {
+          setCurrentPage(pageInfo.currentPage);
+        }
+      } catch (err) {
+        if (requestId !== productRequestIdRef.current) return;
+        setError(err?.response?.data?.message || err?.message || 'Failed to load products.');
+        setProducts([]);
+        setProductPageInfo(emptyPageInfo());
+      } finally {
+        if (requestId === productRequestIdRef.current) {
+          setProductsLoading(false);
+        }
+      }
+    },
+    [storeId, effectiveCategoryIds, buildCacheKey, fetchProductsPage]
+  );
+
+  const prefetchNextPage = useCallback(
+    async (nextPage) => {
+      if (!storeId || nextPage < 1 || !effectiveCategoryIds.length) return;
+
+      const key = buildCacheKey(nextPage);
+      if (prefetchedKeysRef.current.has(key)) return;
+      if (productCacheRef.current.has(key)) return;
+
+      prefetchedKeysRef.current.add(key);
+
+      try {
+        const { items, pageInfo } = await fetchProductsPage(nextPage);
+        productCacheRef.current.set(key, { items, pageInfo, ts: Date.now() });
+      } catch {
+        prefetchedKeysRef.current.delete(key);
+      }
+    },
+    [storeId, effectiveCategoryIds, buildCacheKey, fetchProductsPage]
+  );
+
+  /* =====================================================================
+     DRAFTS
+     ===================================================================== */
   const loadDrafts = useCallback(
     async ({ silent = false } = {}) => {
       if (!storeId) return;
-
       if (!silent) setDraftsLoading(true);
 
       try {
@@ -415,18 +569,12 @@ const loadProducts = useCallback(
         );
 
         const response = await Promise.race([
-          billingService.list({
-            store_id: Number(storeId),
-            per_page: 12,
-            is_draft: true,
-          }),
+          billingService.list({ store_id: Number(storeId), is_draft: true }),
           timeoutPromise,
         ]);
 
         const data = extractList(response);
-        const filtered = (Array.isArray(data) ? data : []).filter((item) =>
-          isOwnedByCurrentCashier(item)
-        );
+        const filtered = (Array.isArray(data) ? data : []).filter(isOwnedByCurrentCashier);
         setDrafts(filtered);
       } catch (err) {
         if (!silent) {
@@ -440,112 +588,217 @@ const loadProducts = useCallback(
     [storeId, isOwnedByCurrentCashier]
   );
 
-  const loadBillingDetail = async (billingId, { silent = false } = {}) => {
-    if (!billingId) return null;
+  /* =====================================================================
+     BILLING DETAIL
+     ===================================================================== */
+  const loadBillingDetail = useCallback(
+    async (billingId, { silent = false } = {}) => {
+      if (!billingId) return null;
+      if (!silent) setBillingLoading(true);
 
-    if (!silent) setBillingLoading(true);
+      try {
+        const response = await billingService.show(billingId);
+        const detail = response?.data || response;
+        setBilling(detail);
+        setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
+        setNotes(detail?.notes || '');
+        mergeDraftPreview(detail);
+        return detail;
+      } catch (err) {
+        setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
+        throw err;
+      } finally {
+        if (!silent) setBillingLoading(false);
+      }
+    },
+    [mergeDraftPreview]
+  );
 
-    try {
-      const response = await billingService.show(billingId);
-      const detail = response?.data || response;
-
-      setBilling(detail);
-      setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
-      setNotes(detail?.notes || '');
-      mergeDraftPreview(detail);
-
-      return detail;
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
-      throw err;
-    } finally {
-      if (!silent) setBillingLoading(false);
-    }
-  };
-
+  /* =====================================================================
+     EFFECTS
+     ===================================================================== */
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(search.trim());
-    }, SEARCH_DEBOUNCE_MS);
-
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [search]);
 
   useEffect(() => {
-    if (success) {
-      const timer = setTimeout(() => {
-        setSuccess('');
-      }, 4000);
-
-      return () => clearTimeout(timer);
-    }
+    if (!success) return;
+    const timer = setTimeout(() => setSuccess(''), 3000);
+    return () => clearTimeout(timer);
   }, [success]);
 
   useEffect(() => {
+    if (activeCategory === 'all') return;
+
+    const stillVisible = visibleCategories.some(
+      (category) => String(getCategoryId(category)) === String(activeCategory)
+    );
+
+    if (!stillVisible) {
+      setActiveCategory('all');
+    }
+  }, [visibleCategories, activeCategory]);
+
+  /* ----- BOOTSTRAP ---------------------------------------------------- */
+  useEffect(() => {
     if (!storeId) return;
 
-    resetSale();
-    setCategories([]);
-    setCustomers([]);
-    setProducts([]);
+    let cancelled = false;
+    const bootstrapId = ++bootstrapRequestId.current;
+    bootstrappedRef.current = false;
+
+    setError('');
+    setSuccess('');
     setDrafts([]);
+    setCustomers([]);
     setSearch('');
     setDebouncedSearch('');
     setDraftSearch('');
     setActiveCategory('all');
-    setCurrentPage(1);
-    setProductPageInfo({
-      currentPage: 1,
-      hasNextPage: false,
-      hasPrevPage: false,
-      from: 0,
-      to: 0,
-      total: null,
-    });
 
-    productCacheRef.current.clear();
-    lastProductFilterRef.current = '';
+    resetSale();
+    resetProductState();
+    resetCategoryState();
 
-    const initializePosData = async () => {
+    const bootstrap = async () => {
       try {
-        await Promise.all([loadStaticData(), loadDrafts({ silent: true })]);
+        const [{ categories: initialCategories }] = await Promise.all([
+          loadStaticData(),
+          loadDrafts({ silent: true }),
+        ]);
+
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+        const initialVisibleCategoryIds = normalizeCategoryIds(
+          initialCategories
+            .map((category) => getCategoryId(category))
+            .filter((id) => id != null)
+        );
+
+        if (!initialVisibleCategoryIds.length) {
+          setProducts([]);
+          setProductPageInfo(emptyPageInfo());
+
+          lastProductFilterRef.current = JSON.stringify({
+            storeId: String(storeId),
+            categoryScope: buildCategoryScopeKey('visible-page', []),
+            search: '',
+          });
+
+          if (!cancelled && bootstrapId === bootstrapRequestId.current) {
+            bootstrappedRef.current = true;
+          }
+          return;
+        }
+
+        setProductsLoading(true);
+
+        const params = {
+          store_id: Number(storeId),
+          page: 1,
+          is_active: true,
+        };
+
+        if (initialVisibleCategoryIds.length === 1) {
+          params.category_id = initialVisibleCategoryIds[0];
+        } else {
+          params.category_ids = initialVisibleCategoryIds.join(',');
+        }
+
+        const response = await productService.list(params);
+
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+        const meta = extractMeta(response);
+        const items = extractList(response);
+        const pageInfo = buildPageInfo(meta, items, 1);
+
+        const initialScopeKey = buildCategoryScopeKey('visible-page', initialVisibleCategoryIds);
+        const cacheKey = JSON.stringify({
+          storeId: String(storeId),
+          page: 1,
+          categoryScope: initialScopeKey,
+          categoryIds: initialVisibleCategoryIds.join(','),
+          search: '',
+        });
+
+        productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
+
+        setProducts(items);
+        setProductPageInfo(pageInfo);
+        setCurrentPage(1);
+
+        lastProductFilterRef.current = JSON.stringify({
+          storeId: String(storeId),
+          categoryScope: initialScopeKey,
+          search: '',
+        });
+
+        if (!cancelled && bootstrapId === bootstrapRequestId.current) {
+          bootstrappedRef.current = true;
+        }
       } catch (err) {
-        console.error('Failed to initialize baseline POS data:', err);
+        if (!cancelled) console.error('POS init failed:', err);
+      } finally {
+        if (!cancelled) setProductsLoading(false);
       }
     };
 
-    initializePosData();
-  }, [storeId, loadStaticData, loadDrafts]);
+    bootstrap();
 
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    storeId,
+    loadStaticData,
+    loadDrafts,
+    resetSale,
+    resetProductState,
+    resetCategoryState,
+  ]);
+
+  /* ----- PRODUCTS RELOAD --------------------------------------------- */
   useEffect(() => {
-    if (!storeId) return;
+    if (!storeId || !bootstrappedRef.current) return;
 
-    const filterSignature = JSON.stringify({
-      storeId: String(storeId),
-      category: String(activeCategory),
-      search: debouncedSearch.trim().toLowerCase(),
-    });
-
-    const filtersChanged = lastProductFilterRef.current !== filterSignature;
+    const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
     if (filtersChanged) {
-      lastProductFilterRef.current = filterSignature;
+      prefetchedKeysRef.current.clear();
 
       if (currentPage !== 1) {
         setCurrentPage(1);
+        lastProductFilterRef.current = currentFilterSignature;
         return;
       }
+
+      lastProductFilterRef.current = currentFilterSignature;
+      void loadProducts(1);
+      return;
     }
 
     void loadProducts(currentPage);
-  }, [storeId, activeCategory, debouncedSearch, currentPage, loadProducts]);
+  }, [storeId, currentPage, currentFilterSignature, loadProducts]);
 
+  /* ----- PRODUCT PREFETCH -------------------------------------------- */
+  useEffect(() => {
+    if (productPageInfo.hasNextPage) {
+      void prefetchNextPage(productPageInfo.currentPage + 1);
+    }
+  }, [productPageInfo.currentPage, productPageInfo.hasNextPage, prefetchNextPage]);
+
+  /* ----- FOCUS SEARCH WHEN IDLE -------------------------------------- */
   useEffect(() => {
     if (!storeLoading && !catalogLoading && !showPaymentModal && !showDraftModal) {
       focusSearchInput();
     }
   }, [storeLoading, catalogLoading, showPaymentModal, showDraftModal, focusSearchInput]);
 
+  /* =====================================================================
+     BILLING OPERATIONS
+     ===================================================================== */
   const ensureDraft = async () => {
     if (billing?.billing_id) return billing;
 
@@ -558,13 +811,11 @@ const loadProducts = useCallback(
     const createdDraft = response?.data || response;
     const detail = await loadBillingDetail(createdDraft.billing_id, { silent: true });
     mergeDraftPreview(detail || createdDraft);
-
     return detail || createdDraft;
   };
 
   const addOrIncrementProduct = async (product) => {
     const current = await ensureDraft();
-
     const existing = current?.items?.find(
       (item) => String(item.product_id) === String(product.product_id)
     );
@@ -583,20 +834,19 @@ const loadProducts = useCallback(
     }
 
     const updatedBilling = await loadBillingDetail(current.billing_id, { silent: true });
-    setDrafts((prev) => prev.filter((item) => String(item.billing_id) !== String(current.billing_id)));
-
+    setDrafts((prev) =>
+      prev.filter((item) => String(item.billing_id) !== String(current.billing_id))
+    );
     return updatedBilling;
   };
 
   const handleAddProduct = async (product) => {
+    if (submitting) return;
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
       await addOrIncrementProduct(product);
-      setSuccess(`${product.product_name} added to billing.`);
-      focusSearchInput(true);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to add product.');
     } finally {
@@ -610,14 +860,13 @@ const loadProducts = useCallback(
   };
 
   const handlePayNow = async (product) => {
+    if (submitting) return;
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
       const updatedBilling = await addOrIncrementProduct(product);
       openPaymentModalForBilling(updatedBilling);
-      setSuccess(`${product.product_name} added. Select payment method.`);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to proceed to payment.');
     } finally {
@@ -627,13 +876,9 @@ const loadProducts = useCallback(
 
   const updateItemQuantity = async (item, nextQuantity) => {
     if (!billing?.billing_id) return;
-
-    if (nextQuantity < 1) {
-      return removeItem(item.billing_item_id);
-    }
+    if (nextQuantity < 1) return removeItem(item.billing_item_id);
 
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
@@ -641,10 +886,8 @@ const loadProducts = useCallback(
         quantity: nextQuantity,
         unit_price: item.unit_price,
       });
-
       const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
       mergeDraftPreview(updatedBilling);
-      focusSearchInput();
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to update quantity.');
     } finally {
@@ -654,16 +897,13 @@ const loadProducts = useCallback(
 
   const removeItem = async (billingItemId) => {
     if (!billing?.billing_id) return;
-
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
       await billingService.removeItem(billingItemId);
       const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
       mergeDraftPreview(updatedBilling);
-      focusSearchInput();
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to remove item.');
     } finally {
@@ -681,13 +921,11 @@ const loadProducts = useCallback(
 
     const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
     mergeDraftPreview(updatedBilling);
-
     return updatedBilling;
   };
 
   const handleSaveOrUpdateDraft = async () => {
     if (!billing?.items?.length) return;
-
     setError('');
     setSuccess('');
     setSubmitting(true);
@@ -695,7 +933,6 @@ const loadProducts = useCallback(
     try {
       const updatedBilling = await persistDraftHeader();
       mergeDraftPreview(updatedBilling);
-
       setSuccess(
         updatedBilling?.billing_id
           ? `Draft #${updatedBilling.billing_id} updated successfully.`
@@ -711,9 +948,7 @@ const loadProducts = useCallback(
 
   const handleProceedToPayment = async () => {
     if (!billing?.items?.length) return;
-
     setError('');
-    setSuccess('');
 
     try {
       const currentBilling = await persistDraftHeader();
@@ -726,10 +961,7 @@ const loadProducts = useCallback(
   const handlePaymentMethodChange = (method) => {
     setPaymentMethod(method);
     setError('');
-
-    if (method !== 'cash') {
-      setAmountTendered('');
-    }
+    if (method !== 'cash') setAmountTendered('');
   };
 
   const validatePayment = () => {
@@ -743,13 +975,6 @@ const loadProducts = useCallback(
       return false;
     }
 
-    if (paymentMethod === 'cash') {
-      if (amountTendered && Number(amountTendered) < Number(amountReceived)) {
-        setError('Cash tendered cannot be less than amount received.');
-        return false;
-      }
-    }
-
     if (paymentMethod === 'mpesa') {
       if (!mpesaPhone.trim()) {
         setError('Please enter MPESA phone number.');
@@ -761,11 +986,9 @@ const loadProducts = useCallback(
       }
     }
 
-    if (paymentMethod === 'card') {
-      if (!cardReference.trim()) {
-        setError('Please enter card reference.');
-        return false;
-      }
+    if (paymentMethod === 'card' && !cardReference.trim()) {
+      setError('Please enter card reference.');
+      return false;
     }
 
     return true;
@@ -814,14 +1037,12 @@ const loadProducts = useCallback(
 
   const handleLoadDraft = async (draftId) => {
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
       await loadBillingDetail(draftId);
       setShowDraftModal(false);
       setShowPaymentModal(false);
-      setSuccess('Draft loaded successfully.');
       focusSearchInput(true);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to load draft.');
@@ -835,19 +1056,12 @@ const loadProducts = useCallback(
     if (!confirmed) return;
 
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
       await deleteBillingRecord(draftId);
-
-      if (String(billing?.billing_id) === String(draftId)) {
-        resetSale();
-      }
-
+      if (String(billing?.billing_id) === String(draftId)) resetSale();
       removeDraftPreview(draftId);
-      setSuccess('Draft moved to trash successfully.');
-      focusSearchInput();
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to delete draft.');
     } finally {
@@ -879,7 +1093,6 @@ const loadProducts = useCallback(
     if (!confirmed) return;
 
     setError('');
-    setSuccess('');
     setSubmitting(true);
 
     try {
@@ -887,18 +1100,26 @@ const loadProducts = useCallback(
         await deleteBillingRecord(billing.billing_id);
         removeDraftPreview(billing.billing_id);
       }
-
       resetSale();
       setSearch('');
-      setSuccess('Current sale moved to trash.');
       focusSearchInput(true);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to cancel current sale.');
     } finally {
       setSubmitting(false);
     }
-  }, [submitting, showPaymentModal, showDraftModal, billing, search, focusSearchInput]);
+  }, [
+    submitting,
+    showPaymentModal,
+    showDraftModal,
+    billing,
+    search,
+    focusSearchInput,
+    removeDraftPreview,
+    resetSale,
+  ]);
 
+  /* ----- global hotkeys ---------------------------------------------- */
   useEffect(() => {
     const handleGlobalKeyDown = (event) => {
       const blockedTarget = isHotkeyBlockedElement(event.target);
@@ -912,10 +1133,7 @@ const loadProducts = useCallback(
 
       if (event.key === 'F8') {
         event.preventDefault();
-
-        if (!submitting && billing?.items?.length) {
-          void handleSaveOrUpdateDraft();
-        }
+        if (!submitting && billing?.items?.length) void handleSaveOrUpdateDraft();
         return;
       }
 
@@ -932,31 +1150,24 @@ const loadProducts = useCallback(
         !showPaymentModal &&
         !showDraftModal;
 
-      if (wantsCheckout) {
-        if (!submitting && billing?.items?.length) {
-          event.preventDefault();
-          void handleProceedToPayment();
-        }
+      if (wantsCheckout && !submitting && billing?.items?.length) {
+        event.preventDefault();
+        void handleProceedToPayment();
       }
     };
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [
-    billing,
-    submitting,
-    showPaymentModal,
-    showDraftModal,
-    focusSearchInput,
-    handleEscapeShortcut,
-  ]);
+  }, [billing, submitting, showPaymentModal, showDraftModal, focusSearchInput, handleEscapeShortcut]);
 
+  /* =====================================================================
+     DERIVED RENDER VALUES
+     ===================================================================== */
   const itemCount =
     billing?.items?.reduce((sum, item) => sum + Number(item.quantity || 0), 0) || 0;
 
   const filteredDrafts = useMemo(() => {
     const keyword = draftSearch.trim().toLowerCase();
-
     if (!keyword) return drafts;
 
     return drafts.filter((draft) => {
@@ -977,6 +1188,44 @@ const loadProducts = useCallback(
     });
   }, [drafts, draftSearch]);
 
+  const selectedCustomer = useMemo(
+    () => customers.find((c) => String(getCustomerId(c)) === String(selectedCustomerId)) || null,
+    [customers, selectedCustomerId]
+  );
+
+  const customerCurrentBalance = Number(
+    selectedCustomer?.current_balance ??
+      selectedCustomer?.balance ??
+      selectedCustomer?.opening_balance ??
+      0
+  );
+
+  /* =====================================================================
+     PAGINATION HANDLERS
+     ===================================================================== */
+  const goToPreviousPage = () => {
+    if (!productPageInfo.hasPrevPage || productsLoading) return;
+    setCurrentPage((prev) => Math.max(prev - 1, 1));
+  };
+
+  const goToNextPage = () => {
+    if (!productPageInfo.hasNextPage || productsLoading) return;
+    setCurrentPage((prev) => Math.min(prev + 1, productPageInfo.lastPage || prev + 1));
+  };
+
+  const goToPrevCategoryPage = async () => {
+    if (!canPrevCategory || categoriesLoading) return;
+    await loadCategoriesPage(categoryPageInfo.currentPage - 1);
+  };
+
+  const goToNextCategoryPage = async () => {
+    if (!canNextCategory || categoriesLoading) return;
+    await loadCategoriesPage(categoryPageInfo.currentPage + 1);
+  };
+
+  /* =====================================================================
+     EARLY RETURNS
+     ===================================================================== */
   if (storeLoading) {
     return (
       <section className="pos-grid cashier-pos-page">
@@ -997,11 +1246,8 @@ const loadProducts = useCallback(
               <h2>Fortune Supermarket</h2>
             </div>
           </div>
-
           <div className="card">
-            <p>
-              <strong>No stores assigned</strong>
-            </p>
+            <p><strong>No stores assigned</strong></p>
             <p className="muted" style={{ marginTop: 8 }}>
               Your account does not have any store assigned. Please contact your administrator.
             </p>
@@ -1010,25 +1256,22 @@ const loadProducts = useCallback(
       </section>
     );
   }
+
+  /* =====================================================================
+     RENDER
+     ===================================================================== */
   return (
     <>
       <section className="pos-grid cashier-pos-page">
         <div className="pos-catalog stack-lg">
-          
           <div className="card hero-card compact-hero">
             <div className="store-header-layout">
               <div className="store-brand-identity">
-                <span className="eyebrow">
-                  {user?.role || currentStore?.role || 'Cashier'}
-                </span>
-                <h2 className="store-title">
-                  {currentStore?.store_name || 'Fortune Supermarket'}
-                </h2>
+                <span className="eyebrow">{user?.role || currentStore?.role || 'Cashier'}</span>
+                <h2 className="store-title">{currentStore?.store_name || 'Fortune Supermarket'}</h2>
               </div>
               <div className="store-contact-meta">
-                <span className="meta-location">
-                  {currentStore?.location || 'Store Location'}
-                </span>
+                <span className="meta-location">{currentStore?.location || 'Store Location'}</span>
                 <p className="meta-address">
                   {currentStore?.physical_address || 'Physical address not available'}
                 </p>
@@ -1052,27 +1295,77 @@ const loadProducts = useCallback(
               />
             </div>
 
-            <div className="chips-row">
+            <div
+              className="chips-row"
+              style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
+            >
+              <button
+                type="button"
+                className="chip chip-nav"
+                onClick={goToPrevCategoryPage}
+                disabled={!canPrevCategory || categoriesLoading}
+                aria-label="Previous categories"
+                title="Previous categories"
+                style={{ padding: '6px 8px' }}
+              >
+                <ChevronLeft size={14} />
+              </button>
+
               <button
                 type="button"
                 className={`chip ${activeCategory === 'all' ? 'active' : ''}`}
                 onClick={() => setActiveCategory('all')}
+                disabled={!visibleCategories.length}
               >
                 All
               </button>
 
-              {categories.map((category) => (
-                <button
-                  key={category.category_id}
-                  type="button"
-                  className={`chip ${
-                    String(activeCategory) === String(category.category_id) ? 'active' : ''
-                  }`}
-                  onClick={() => setActiveCategory(category.category_id)}
+              {visibleCategories.map((category) => {
+                const categoryId = getCategoryId(category);
+                if (categoryId == null) return null;
+
+                return (
+                  <button
+                    key={String(categoryId)}
+                    type="button"
+                    className={`chip ${String(activeCategory) === String(categoryId) ? 'active' : ''}`}
+                    onClick={() => setActiveCategory(categoryId)}
+                  >
+                    {category.category_name}
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                className="chip chip-nav"
+                onClick={goToNextCategoryPage}
+                disabled={!canNextCategory || categoriesLoading}
+                aria-label="Next categories"
+                title="Next categories"
+                style={{ padding: '6px 8px' }}
+              >
+                <ChevronRight size={14} />
+              </button>
+
+              {categoryPageInfo.total > 0 && (
+                <span
+                  className="muted"
+                  style={{ fontSize: 12, marginLeft: 4 }}
+                  aria-live="polite"
                 >
-                  {category.category_name}
-                </button>
-              ))}
+                  {categoryPageInfo.currentPage}/{categoryPageInfo.lastPage}
+                  <span style={{ marginLeft: 6, opacity: 0.8 }}>
+                    ({categoryPageInfo.perPage} per page)
+                  </span>
+                </span>
+              )}
+
+              {categoriesLoading ? (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Loading categories...
+                </span>
+              ) : null}
             </div>
           </div>
 
@@ -1081,8 +1374,6 @@ const loadProducts = useCallback(
           ) : (
             <>
               {error ? <div className="form-error">{error}</div> : null}
-              {success ? <div className="form-success">{success}</div> : null}
-
               {productsLoading ? <div className="page-loader">Loading products...</div> : null}
 
               <div className="products-grid products-grid-enhanced">
@@ -1111,7 +1402,6 @@ const loadProducts = useCallback(
                           >
                             Pay Now
                           </button>
-
                           <button
                             type="button"
                             className="ghost-button add-btn"
@@ -1133,7 +1423,7 @@ const loadProducts = useCallback(
 
                 {!productsLoading && !products.length ? (
                   <div className="card">
-                    <p>No products matched your search.</p>
+                    <p>Empty.</p>
                   </div>
                 ) : null}
               </div>
@@ -1141,38 +1431,33 @@ const loadProducts = useCallback(
               {products.length > 0 ? (
                 <div className="pagination-bar">
                   <div className="pagination-summary">
-                    {productPageInfo.total !== null ? (
-                      <>
-                        Showing <strong>{productPageInfo.from}</strong> -{' '}
-                        <strong>{productPageInfo.to}</strong> of{' '}
-                        <strong>{productPageInfo.total}</strong> products
-                      </>
-                    ) : (
-                      <>
-                        Showing <strong>{productPageInfo.from}</strong> -{' '}
-                        <strong>{productPageInfo.to}</strong> products
-                      </>
-                    )}
+                    Showing <strong>{productPageInfo.from}</strong> -{' '}
+                    <strong>{productPageInfo.to}</strong> of{' '}
+                    <strong>{productPageInfo.total}</strong> products
+                    <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                      ({productPageInfo.perPage} per page)
+                    </span>
                   </div>
 
                   <div className="pagination-controls">
                     <button
                       type="button"
                       className="ghost-button pagination-btn"
-                      onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                      onClick={goToPreviousPage}
                       disabled={!productPageInfo.hasPrevPage || productsLoading}
                     >
                       Previous
                     </button>
 
                     <span className="pagination-page-indicator">
-                      Page <strong>{productPageInfo.currentPage}</strong>
+                      Page <strong>{productPageInfo.currentPage}</strong> of{' '}
+                      <strong>{productPageInfo.lastPage}</strong>
                     </span>
 
                     <button
                       type="button"
                       className="ghost-button pagination-btn"
-                      onClick={() => setCurrentPage((prev) => prev + 1)}
+                      onClick={goToNextPage}
                       disabled={!productPageInfo.hasNextPage || productsLoading}
                     >
                       Next
@@ -1193,7 +1478,6 @@ const loadProducts = useCallback(
                   {billing ? billing.invnumber || `Draft #${billing.billing_id}` : 'No active billing yet'}
                 </p>
               </div>
-
               <div className="cart-badge">
                 <ShoppingCart size={16} />
                 <span>{itemCount} items</span>
@@ -1205,11 +1489,7 @@ const loadProducts = useCallback(
                 <div className="selected-customer-box">
                   <div className="customer-meta">
                     <span className="meta-label">Customer</span>
-                    <strong>
-                      {customers.find(
-                        (c) => String(c.customer_id) === String(selectedCustomerId)
-                      )?.full_name || 'Selected Customer'}
-                    </strong>
+                    <strong>{selectedCustomer?.full_name || 'Selected Customer'}</strong>
                   </div>
                   <button
                     type="button"
@@ -1230,7 +1510,10 @@ const loadProducts = useCallback(
                     >
                       <option value="">Customer</option>
                       {customers.map((customer) => (
-                        <option key={customer.customer_id} value={customer.customer_id}>
+                        <option
+                          key={String(getCustomerId(customer))}
+                          value={String(getCustomerId(customer))}
+                        >
                           {customer.full_name}
                         </option>
                       ))}
@@ -1252,7 +1535,6 @@ const loadProducts = useCallback(
                 <FolderClock size={16} />
                 Drafts ({drafts.length})
               </button>
-
               {draftsLoading && <span className="inline-note-spinner">Refreshing drafts...</span>}
             </div>
           </div>
@@ -1266,7 +1548,6 @@ const loadProducts = useCallback(
                 <h3>Billing items</h3>
                 {billingLoading ? <p>Refreshing billing...</p> : null}
               </div>
-
               <div
                 className="header-action-icons-row"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
@@ -1281,20 +1562,16 @@ const loadProducts = useCallback(
                 >
                   <FolderClock size={16} />
                 </button>
-
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() =>
-                    billing && openBillingPrint(billing, currentStore, 'invoice', printSettings)
-                  }
+                  onClick={() => billing && openBillingPrint(billing, currentStore, 'invoice', printSettings)}
                   disabled={!billing}
                   title="Print"
                   style={{ padding: '6px', minWidth: 'auto' }}
                 >
                   <Printer size={16} />
                 </button>
-
                 <button
                   type="button"
                   className="ghost-button"
@@ -1316,12 +1593,10 @@ const loadProducts = useCallback(
                       <strong className="product-name">{item.product?.product_name}</strong>
                       <div className="vat-meta-wrapper">
                         <span className="vat-badge">
-                          {item.vat_amount !== undefined &&
-                            ` +${Number(item.vat_amount).toFixed(2)}`} (VAT)
+                          {item.vat_amount !== undefined && ` +${Number(item.vat_amount).toFixed(2)}`} (VAT)
                         </span>
                       </div>
                     </div>
-
                     <div className="billing-item-actions">
                       <div className="quantity-control">
                         <button
@@ -1332,9 +1607,7 @@ const loadProducts = useCallback(
                         >
                           <Minus size={14} />
                         </button>
-
                         <span className="quantity-display">{item.quantity}</span>
-
                         <button
                           type="button"
                           className="icon-button"
@@ -1344,11 +1617,9 @@ const loadProducts = useCallback(
                           <Plus size={14} />
                         </button>
                       </div>
-
                       <strong className="line-total">
                         {currency(getItemTotal(item), currentStore?.currency)}
                       </strong>
-
                       <button
                         type="button"
                         className="icon-button danger-icon"
@@ -1373,16 +1644,13 @@ const loadProducts = useCallback(
                     {currency(billing?.subtotal || 0, currentStore?.currency)}
                   </span>
                 </div>
-
                 <div className="summary-row">
                   <span className="summary-label">VAT ({Number(billing?.vat_rate || 16)}%)</span>
                   <span className="summary-value">
                     {currency(billing?.vat_amount || 0, currentStore?.currency)}
                   </span>
                 </div>
-
                 <div className="summary-divider"></div>
-
                 <div className="summary-row total-accent-row">
                   <span className="total-label">Total Amount</span>
                   <strong className="total-value">
@@ -1415,7 +1683,6 @@ const loadProducts = useCallback(
                 <h3>Payment</h3>
                 <p className="muted">{billing?.invnumber || `Draft #${billing?.billing_id || ''}`}</p>
               </div>
-
               <button
                 type="button"
                 className="icon-button"
@@ -1432,41 +1699,30 @@ const loadProducts = useCallback(
                   <span>Total due</span>
                   <strong>{currency(billing?.total || 0, currentStore?.currency)}</strong>
                 </div>
-
                 <div className="payment-summary-pill">
                   <span>Items</span>
                   <strong>{itemCount}</strong>
                 </div>
-
                 {selectedCustomerId ? (
                   <div className="payment-summary-pill">
                     <span>Customer</span>
-                    <strong>
-                      {customers.find(
-                        (customer) => String(customer.customer_id) === String(selectedCustomerId)
-                      )?.full_name || 'Selected'}
-                    </strong>
+                    <strong>{selectedCustomer?.full_name || 'Selected'}</strong>
                   </div>
                 ) : null}
               </div>
 
               <div className="payment-method-card-grid">
-                {paymentMethods.map((method) => {
+                {PAYMENT_METHODS.map((method) => {
                   const Icon = method.icon;
-
                   return (
                     <button
                       key={method.key}
                       type="button"
-                      className={`payment-method-card ${
-                        paymentMethod === method.key ? 'active' : ''
-                      }`}
+                      className={`payment-method-card ${paymentMethod === method.key ? 'active' : ''}`}
                       onClick={() => handlePaymentMethodChange(method.key)}
                     >
                       <div className="payment-method-card-top">
-                        <span className="payment-method-icon">
-                          <Icon size={18} />
-                        </span>
+                        <span className="payment-method-icon"><Icon size={18} /></span>
                         <strong>{method.title}</strong>
                       </div>
                       <p>{method.description}</p>
@@ -1479,8 +1735,36 @@ const loadProducts = useCallback(
                 <div className="payment-fields-card">
                   {paymentMethod === 'cash' ? (
                     <div className="form-grid two-columns payment-fields-grid">
-                      <label>
-                        Cash received
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>
+                          Amount to be paid
+                          {selectedCustomer && (() => {
+                            const activeBalance = Number(
+                              billing?.customer?.current_balance ??
+                              selectedCustomer?.current_balance ??
+                              customerCurrentBalance ??
+                              0
+                            );
+                            return activeBalance > 0 ? (
+                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
+                                ({`+${activeBalance.toFixed(2)}`})
+                              </span>
+                            ) : null;
+                          })()}
+                        </span>
+                        <input
+                          className="text-input"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={amountReceived}
+                          onChange={(e) => setAmountReceived(e.target.value)}
+                          placeholder="Amount to be paid"
+                        />
+                      </label>
+
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>Cash received</span>
                         <input
                           className="text-input"
                           type="number"
@@ -1492,16 +1776,29 @@ const loadProducts = useCallback(
                         />
                       </label>
 
-                      <label>
-                        Amount to be paid
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>Change</span>
                         <input
                           className="text-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={amountReceived}
-                          onChange={(e) => setAmountReceived(e.target.value)}
-                          placeholder="Amount to be paid"
+                          type="text"
+                          value={(() => {
+                            const cashTendered = Number(amountTendered || 0);
+                            const invoiceAmount = Number(amountReceived || billing?.total || 0);
+                            const legacyDebt = selectedCustomer
+                              ? Number(
+                                  billing?.customer?.current_balance ??
+                                  selectedCustomer?.current_balance ??
+                                  customerCurrentBalance ??
+                                  0
+                                )
+                              : 0;
+                            const totalTarget = invoiceAmount + legacyDebt;
+                            const realChange = cashTendered - totalTarget;
+                            return realChange > 0 ? realChange.toFixed(2) : '0.00';
+                          })()}
+                          readOnly
+                          placeholder="0.00"
+                          style={{ fontWeight: 'bold', backgroundColor: '#f5f5f5' }}
                         />
                       </label>
                     </div>
@@ -1509,21 +1806,47 @@ const loadProducts = useCallback(
 
                   {paymentMethod === 'mpesa' ? (
                     <div className="form-grid two-columns payment-fields-grid">
-                      <label>
-                        Amount to be paid
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>
+                          Amount to be paid
+                          {selectedCustomer && (() => {
+                            const activeBalance = Number(
+                              billing?.customer?.current_balance ??
+                              selectedCustomer?.current_balance ??
+                              customerCurrentBalance ??
+                              0
+                            );
+                            return activeBalance > 0 ? (
+                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
+                                ({`+${activeBalance.toFixed(2)}`})
+                              </span>
+                            ) : null;
+                          })()}
+                        </span>
                         <input
                           className="text-input"
                           type="number"
                           min="0"
                           step="0.01"
-                          value={amountReceived}
+                          value={(() => {
+                            const invoiceAmount = Number(billing?.total || 0);
+                            const legacyDebt = selectedCustomer
+                              ? Number(
+                                  billing?.customer?.current_balance ??
+                                  selectedCustomer?.current_balance ??
+                                  customerCurrentBalance ??
+                                  0
+                                )
+                              : 0;
+                            return amountReceived || (invoiceAmount + legacyDebt).toFixed(2);
+                          })()}
                           onChange={(e) => setAmountReceived(e.target.value)}
                           placeholder="Amount to be paid"
                         />
                       </label>
 
-                      <label>
-                        MPESA phone number
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>MPESA phone number</span>
                         <input
                           className="text-input"
                           type="text"
@@ -1533,8 +1856,11 @@ const loadProducts = useCallback(
                         />
                       </label>
 
-                      <label className="span-2">
-                        MPESA transaction code
+                      <label
+                        className="span-2"
+                        style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
+                      >
+                        <span>MPESA transaction code</span>
                         <input
                           className="text-input"
                           type="text"
@@ -1548,21 +1874,47 @@ const loadProducts = useCallback(
 
                   {paymentMethod === 'card' ? (
                     <div className="form-grid two-columns payment-fields-grid">
-                      <label>
-                        Paid amount
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>
+                          Amount to be paid
+                          {selectedCustomer && (() => {
+                            const activeBalance = Number(
+                              billing?.customer?.current_balance ??
+                              selectedCustomer?.current_balance ??
+                              customerCurrentBalance ??
+                              0
+                            );
+                            return activeBalance > 0 ? (
+                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
+                                ({`+${activeBalance.toFixed(2)}`})
+                              </span>
+                            ) : null;
+                          })()}
+                        </span>
                         <input
                           className="text-input"
                           type="number"
                           min="0"
                           step="0.01"
-                          value={amountReceived}
+                          value={(() => {
+                            const invoiceAmount = Number(billing?.total || 0);
+                            const legacyDebt = selectedCustomer
+                              ? Number(
+                                  billing?.customer?.current_balance ??
+                                  selectedCustomer?.current_balance ??
+                                  customerCurrentBalance ??
+                                  0
+                                )
+                              : 0;
+                            return amountReceived || (invoiceAmount + legacyDebt).toFixed(2);
+                          })()}
                           onChange={(e) => setAmountReceived(e.target.value)}
                           placeholder="Paid amount"
                         />
                       </label>
 
-                      <label>
-                        Card holder
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span>Card holder</span>
                         <input
                           className="text-input"
                           type="text"
@@ -1572,8 +1924,11 @@ const loadProducts = useCallback(
                         />
                       </label>
 
-                      <label className="span-2">
-                        Card reference
+                      <label
+                        className="span-2"
+                        style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
+                      >
+                        <span>Card reference</span>
                         <input
                           className="text-input"
                           type="text"
@@ -1600,7 +1955,6 @@ const loadProducts = useCallback(
                 >
                   Charge Payment
                 </button>
-
                 <button
                   type="button"
                   className="ghost-button"
@@ -1623,19 +1977,14 @@ const loadProducts = useCallback(
                 <h3>Saved Drafts</h3>
                 <p className="muted">Only your drafts for this store are shown</p>
               </div>
-
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setShowDraftModal(false)}
-              >
+              <button type="button" className="icon-button" onClick={() => setShowDraftModal(false)}>
                 <X size={18} />
               </button>
             </div>
 
             <div className="toolbar-row pos-toolbar-wrap" style={{ marginBottom: 12 }}>
               <div className="search-shell">
-                <Search size={16} />
+                <Search className="search-icon-pos" size={16} />
                 <input
                   value={draftSearch}
                   onChange={(e) => setDraftSearch(e.target.value)}
@@ -1669,7 +2018,6 @@ const loadProducts = useCallback(
                         {draft.customer?.email ? <small>{draft.customer.email}</small> : null}
                         {draft.notes ? <span className="draft-note">{draft.notes}</span> : null}
                       </div>
-
                       <div className="align-right draft-side-meta">
                         <strong>{currency(draft.total || 0, currentStore?.currency)}</strong>
                         <p>{formatDateTime(draft.billing_date)}</p>
@@ -1685,14 +2033,14 @@ const loadProducts = useCallback(
                       >
                         Edit
                       </button>
+
                       <button
                         type="button"
                         className="ghost-button danger-button"
                         onClick={() => handleDeleteDraft(draft.billing_id)}
                         disabled={submitting}
                       >
-                        <Trash2 size={14} />
-                        Delete
+                        <Trash2 size={14} /> Delete
                       </button>
                     </div>
                   </div>

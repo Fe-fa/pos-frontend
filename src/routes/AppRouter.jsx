@@ -21,6 +21,8 @@ import ResetPasswordPage from '../pages/auth/ResetPasswordPage';
 import CashierPosPage from '../pages/cashier/CashierPosPage';
 import { getUserHomePath } from '../utils/helpers';
 import AdminAccessControlPage from '../pages/admin/AdminAccessControlPage';
+import AdminCashiersPage from '../pages/admin/AdminCashiersPage';
+
 
 function RootRedirect() {
   const { user } = useAuth();
@@ -51,6 +53,7 @@ export default function AppRouter() {
           <Route path="billings" element={<AdminBillingsPage />} />
           <Route path="orders" element={<AdminOrdersPage />} />
           <Route path="users" element={<AdminUsersPage />} />
+          <Route path="/admin/cashiers" element={<AdminCashiersPage />} />
           <Route path="settings" element={<AdminSettingsPage />} />
           <Route path="stores" element={<AdminStoresPage />} />
           <Route path="access-control" element={<AdminAccessControlPage />} />

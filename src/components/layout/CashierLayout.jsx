@@ -1,4 +1,5 @@
-import { Bell, LogOut, Moon, Sun, UserCircle2 } from 'lucide-react';
+import { Bell, LogOut, Moon, Search, Sun, UserCircle2 } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
@@ -7,8 +8,12 @@ import { useTheme } from '../../contexts/ThemeContext';
 export default function CashierLayout() {
   const navigate = useNavigate();
   const { logout, user } = useAuth();
-  const { activeStore } = useStore(); 
+  const { activeStore } = useStore();
   const { theme, toggleTheme } = useTheme();
+
+  // Added state and ref for the search input
+  const [search, setSearch] = useState('');
+  const searchInputRef = useRef(null);
 
   const handleLogout = async () => {
     try {
@@ -24,16 +29,17 @@ export default function CashierLayout() {
   return (
     <div className="cashier-shell">
       <header className="cashier-topbar">
-        
-        {/* Left Brand Content Side */}
+
+        {/* Left Side Group: Logo + Action Tools combined inside brand-inline */}
         <div className="brand-inline">
           <div className="brand-logo">
             {activeStore?.logo_url ? (
-              <img 
-                src={activeStore.logo_url} 
-                alt={`${activeStoreName} Logo`} 
+              <img
+                src={activeStore.logo_url}
+                alt={`${activeStoreName} Logo`}
                 className="store-logo-img"
                 onError={(e) => {
+                  // Fixed: Removed TypeScript type casting
                   e.target.style.display = 'none';
                   if (e.target.nextSibling) {
                     e.target.nextSibling.style.display = 'block';
@@ -43,19 +49,13 @@ export default function CashierLayout() {
             ) : null}
             {!activeStore?.logo_url && <span>SP</span>}
           </div>
-          
-          <div>
-            <h1>SwiftPOS</h1>
-            <p>{activeStoreName}</p>
+
+          <div className="cashier-tools">
+            <div>
+              <h1>SwiftPOS</h1>
+              <p>{activeStoreName}</p>
+            </div>
           </div>
-        </div>
-
-        {/* Right Tools Action Side */}
-        <div className="cashier-tools">
-          <span className="eyebrow">
-            {user?.role || 'Cashier'}
-          </span>
-
           <button type="button" className="icon-button" onClick={toggleTheme} aria-label="Toggle Theme">
             {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
           </button>
@@ -63,18 +63,15 @@ export default function CashierLayout() {
           <button type="button" className="icon-button" aria-label="Notifications">
             <Bell size={18} />
           </button>
-
-          <div className="cashier-user">
-            <UserCircle2 size={20} />
+          <div className="cashier-user" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <UserCircle2 size={25} />
             <span>{user?.full_name || 'Employee'}</span>
           </div>
-
-          <button type="button" className="ghost-button" onClick={handleLogout}>
-            <LogOut size={15} /> 
-            <span>Logout</span>
-          </button>
         </div>
-
+        <button type="button" className="ghost-button" onClick={handleLogout}>
+          <LogOut size={15} />
+          <span>Logout</span>
+        </button>
       </header>
 
       {/* Main Content Area */}

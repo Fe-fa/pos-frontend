@@ -1,44 +1,64 @@
-import { X } from 'lucide-react';
+import { X, Edit, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { categoryService } from '../../services/categoryService';
 import { useStore } from '../../contexts/StoreContext';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const initialForm = { category_name: '' };
-
-const extractList = (res) => {
-  if (Array.isArray(res?.data?.data)) return res.data.data;
-  if (Array.isArray(res?.data)) return res.data;
-  if (Array.isArray(res)) return res;
-  return [];
-};
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function AdminCategoriesPage() {
   const { storeId } = useStore();
 
   const [categories, setCategories] = useState([]);
+  const [meta, setMeta] = useState({ ...EMPTY_META });
+  const [page, setPage] = useState(1);
+
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
+
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+    }, SEARCH_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [search]);
+
   const loadCategories = async () => {
     if (!storeId) {
       setCategories([]);
+      setMeta({ ...EMPTY_META });
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setError('');
+
     try {
-      const response = await categoryService.list({ store_id: storeId, search, per_page: 10 });
-      setCategories(extractList(response));
+      const response = await categoryService.list({
+        store_id: Number(storeId),
+        search: debouncedSearch || undefined,
+        page,
+        per_page: 10,
+      });
+
+      const parsed = extractPaginated(response, 10);
+      setCategories(parsed.data);
+      setMeta(parsed.meta);
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to load categories.');
       setCategories([]);
+      setMeta({ ...EMPTY_META });
     } finally {
       setLoading(false);
     }
@@ -46,23 +66,20 @@ export default function AdminCategoriesPage() {
 
   useEffect(() => {
     setCategories([]);
+    setMeta({ ...EMPTY_META });
     setSearch('');
     setShowModal(false);
     setEditingId(null);
     setForm(initialForm);
     setError('');
+    setPage(1);
 
-    if (!storeId) {
-      setLoading(false);
-      return;
-    }
-
-    loadCategories();
+    if (!storeId) setLoading(false);
   }, [storeId]);
 
   useEffect(() => {
     loadCategories();
-  }, [storeId, search]);
+  }, [storeId, debouncedSearch, page]);
 
   const resetForm = () => {
     setForm(initialForm);
@@ -85,6 +102,7 @@ export default function AdminCategoriesPage() {
     e.preventDefault();
     setError('');
     setSubmitting(true);
+
     try {
       const payload = {
         store_id: Number(storeId),
@@ -99,12 +117,17 @@ export default function AdminCategoriesPage() {
 
       setShowModal(false);
       resetForm();
-      await loadCategories();
+
+      if (!editingId) {
+        setPage(1);
+      } else {
+        await loadCategories();
+      }
     } catch (err) {
       setError(
         err?.response?.data?.message ||
-        err?.response?.data?.errors?.category_name?.[0] ||
-        'Unable to save category.'
+          err?.response?.data?.errors?.category_name?.[0] ||
+          'Unable to save category.'
       );
     } finally {
       setSubmitting(false);
@@ -112,31 +135,46 @@ export default function AdminCategoriesPage() {
   };
 
   const handleEdit = (category) => {
-    setEditingId(category.category_uuid);
+    setEditingId(category.category_id);
     setForm({ category_name: category.category_name || '' });
     setError('');
     setShowModal(true);
   };
 
-  const handleDelete = async (category) => {
+  const handleDelete = async (categoryId) => {
     if (!window.confirm('Delete this category?')) return;
+
     try {
-      await categoryService.remove(category.category_uuid);
-      await loadCategories();
+      await categoryService.remove(categoryId);
+
+      if (categories.length === 1 && page > 1) {
+        setPage((prev) => prev - 1);
+      } else {
+        await loadCategories();
+      }
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to delete category.');
     }
   };
+
   return (
     <>
       <section className="stack-lg">
         <div className="catalog-hero" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
           <div className="catalog-hero-copy">
             <h3 className="catalog-title">Categories</h3>
-            <p className="catalog-subtitle">{categories.length} category records</p>
+            <p className="catalog-subtitle">
+              Showing {meta.from}-{meta.to} of {meta.total}
+            </p>
           </div>
 
-          <button type="button" className="ghost-button" onClick={openCreateModal} style={{ whiteSpace: 'nowrap' }} disabled={!storeId}>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={openCreateModal}
+            style={{ whiteSpace: 'nowrap' }}
+            disabled={!storeId}
+          >
             New category
           </button>
         </div>
@@ -147,7 +185,10 @@ export default function AdminCategoriesPage() {
               className="text-input"
               placeholder="Search category"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
               disabled={!storeId}
             />
           </label>
@@ -173,16 +214,16 @@ export default function AdminCategoriesPage() {
                   <tr><td colSpan="3">Loading...</td></tr>
                 ) : categories.length ? (
                   categories.map((category) => (
-                    <tr key={category.category_uuid}>
+                    <tr key={category.category_id}>
                       <td>{category.category_name}</td>
                       <td>{category.products_count || 0}</td>
                       <td>
                         <div className="row-actions compact">
-                          <button type="button" className="ghost-button" onClick={() => handleEdit(category)}>
-                            Edit
+                          <button type="button" className="ghost-button" onClick={() => handleEdit(category)} title="Edit">
+                            <Edit size={16} />
                           </button>
-                          <button type="button" className="ghost-button danger" onClick={() => handleDelete(category.category_uuid)}>
-                            Delete
+                          <button type="button" className="ghost-button danger" onClick={() => handleDelete(category.category_id)} title="Delete">
+                            <Trash2 size={16} />
                           </button>
                         </div>
                       </td>
@@ -194,6 +235,34 @@ export default function AdminCategoriesPage() {
               </tbody>
             </table>
           </div>
+
+          {storeId ? (
+            <div className="pagination-bar">
+              <div className="pagination-summary">
+                Page <strong>{meta.current_page}</strong> of <strong>{meta.last_page}</strong>
+              </div>
+
+              <div className="pagination-controls">
+                <button
+                  type="button"
+                  className="ghost-button pagination-btn"
+                  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={!meta.has_prev_page || loading}
+                >
+                  Previous
+                </button>
+
+                <button
+                  type="button"
+                  className="ghost-button pagination-btn"
+                  onClick={() => setPage((prev) => Math.min(prev + 1, meta.last_page))}
+                  disabled={!meta.has_next_page || loading}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          ) : null}
         </article>
       </section>
 

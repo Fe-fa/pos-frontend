@@ -1,9 +1,10 @@
-import { Plus, X } from 'lucide-react';
+import { Plus, X, Edit, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { categoryService } from '../../services/categoryService';
 import { productService } from '../../services/productService';
 import { currency } from '../../utils/helpers';
 import { useStore } from '../../contexts/StoreContext';
+
 const IMAGE_BASE_URL =
   import.meta.env.VITE_STORAGE_URL ||
   `${import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'}/storage/`;
@@ -477,19 +478,24 @@ export default function AdminProductsPage() {
 
                         <td>
                           <div className="row-actions compact">
+                            {/* Edit Button */}
                             <button
                               type="button"
                               className="ghost-button"
                               onClick={() => handleEdit(product)}
+                              title="Edit"
                             >
-                              Edit
+                              <Edit size={16} />
                             </button>
+
+                            {/* Delete Button */}
                             <button
                               type="button"
                               className="ghost-button danger"
                               onClick={() => handleDelete(product.product_uuid)}
+                              title="Delete"
                             >
-                              Delete
+                              <Trash2 size={16} />
                             </button>
                           </div>
                         </td>
@@ -580,12 +586,16 @@ export default function AdminProductsPage() {
                   </select>
                 </label>
 
+
+
+
                 <label>
                   SKU
                   <input
                     className="text-input"
                     placeholder="e.g. PROD-01"
                     value={form.sku}
+                    readOnly={editingId} // Prevent SKU changes when editing
                     onChange={(e) => setForm({ ...form, sku: e.target.value })}
                     required
                   />
@@ -638,6 +648,7 @@ export default function AdminProductsPage() {
                     min="0"
                     step="0.01"
                     value={form.vat_rate}
+                    readOnly={editingId} // Prevent VAT changes when editing to avoid complications — can be toggled on/off with apply_vat
                     disabled={!form.apply_vat}
                     onChange={(e) => setForm({ ...form, vat_rate: e.target.value })}
                     placeholder={form.apply_vat ? 'Enter VAT rate' : 'Enable VAT first'}
