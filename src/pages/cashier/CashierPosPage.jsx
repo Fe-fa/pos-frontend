@@ -29,6 +29,7 @@ const SEARCH_DEBOUNCE_MS = 300;
 const PRODUCT_CACHE_TTL_MS = 60_000;
 const CATEGORY_CACHE_TTL_MS = 60_000;
 const FALLBACK_PER_PAGE = 12;
+const DEFAULT_VAT_RATE = 16;
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
 
@@ -38,6 +39,7 @@ const PAYMENT_METHODS = [
   { key: 'card', title: 'CARD', description: 'Enter card reference', icon: CreditCard },
 ];
 
+/* ----------------------- helpers ----------------------- */
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
   if (Array.isArray(res?.data)) return res.data;
@@ -122,12 +124,107 @@ const emptyPageInfo = () => ({
   perPage: FALLBACK_PER_PAGE,
 });
 
-const normalizeCategoryIds = (ids) =>
-  ids
-    .map((id) => Number(id))
-    .filter((id) => Number.isFinite(id) && id > 0);
+/* ----------------------- local-cart math ----------------------- */
+const calcLineFromGross = (qty, unitPrice, vatRate) => {
+  const q = Number(qty || 0);
+  const p = Number(unitPrice || 0);
+  const v = Number(vatRate || 0);
+  const totalAmount = +(q * p).toFixed(2);
+  const lineSubtotal = +(totalAmount / (1 + v / 100)).toFixed(2);
+  const vatAmount = +(totalAmount - lineSubtotal).toFixed(2);
+  return { line_subtotal: lineSubtotal, vat_amount: vatAmount, total_amount: totalAmount };
+};
 
-const buildCategoryScopeKey = (mode, ids) => `${mode}:${ids.join(',')}`;
+const recalcBillingTotals = (billing) => {
+  if (!billing) return billing;
+  const items = billing.items || [];
+  const subtotal = items.reduce((s, it) => s + Number(it.line_subtotal || 0), 0);
+  const vat_amount = items.reduce((s, it) => s + Number(it.vat_amount || 0), 0);
+  const total = +(subtotal + vat_amount).toFixed(2);
+  const grossTotal = items.reduce((s, it) => s + Number(it.total_amount || 0), 0);
+  const blendedRate = subtotal > 0 ? +((vat_amount / subtotal) * 100).toFixed(2) : DEFAULT_VAT_RATE;
+  return {
+    ...billing,
+    items,
+    subtotal: +subtotal.toFixed(2),
+    vat_amount: +vat_amount.toFixed(2),
+    total: +Math.max(total, grossTotal).toFixed(2),
+    vat_rate: billing.vat_rate || blendedRate,
+  };
+};
+
+const buildLocalItem = (product, quantity = 1) => {
+  const unitPrice = Number(product.price || 0);
+  const vatRate = Number(product.vat_rate ?? DEFAULT_VAT_RATE);
+  const totals = calcLineFromGross(quantity, unitPrice, vatRate);
+  return {
+    billing_item_id: `local-${product.product_id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    product_id: product.product_id,
+    product: {
+      product_id: product.product_id,
+      product_name: product.product_name,
+      sku: product.sku,
+      price: product.price,
+      vat_rate: product.vat_rate,
+    },
+    quantity,
+    unit_price: unitPrice,
+    vat_rate: vatRate,
+    ...totals,
+    __local: true,
+  };
+};
+
+const buildEmptyLocalBilling = () => ({
+  billing_id: null,
+  invnumber: null,
+  is_draft: true,
+  items: [],
+  customer_id: null,
+  notes: null,
+  subtotal: 0,
+  vat_amount: 0,
+  total: 0,
+  vat_rate: DEFAULT_VAT_RATE,
+  __local: true,
+});
+
+/* ----------------------- localStorage layer ----------------------- */
+const LS_PREFIX = 'pos.cart.v1';
+const cartStorageKey = (storeId, userId) =>
+  `${LS_PREFIX}::store_${storeId || 'na'}::user_${userId || 'na'}`;
+
+const safeLoadCart = (key) => {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const safeSaveCart = (key, payload) => {
+  try {
+    if (!payload || !payload.items?.length) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    /* quota or privacy mode — ignore */
+  }
+};
+
+const safeClearCart = (key) => {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+};
 
 export default function CashierPosPage() {
   const { user } = useAuth();
@@ -150,6 +247,13 @@ export default function CashierPosPage() {
   const bootstrappedRef = useRef(false);
   const bootstrapRequestId = useRef(0);
 
+  // Background-sync queue: serialise all server mutations on the active billing.
+  const syncQueueRef = useRef(Promise.resolve());
+  const billingRef = useRef(null);              // always-current billing snapshot for handlers
+  const cartStorageKeyRef = useRef('');          // current localStorage key
+  const hydratedFromStorageRef = useRef(false);  // restore-from-LS only once per session
+
+  /* --- state ---------------------------------------------------------- */
   const [categories, setCategories] = useState([]);
   const [categoryPageInfo, setCategoryPageInfo] = useState(emptyPageInfo());
 
@@ -190,30 +294,21 @@ export default function CashierPosPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  /* --- derived / memos ------------------------------------------------ */
   const visibleCategories = categories;
 
-  const visibleCategoryIds = useMemo(
-    () =>
-      normalizeCategoryIds(
-        visibleCategories
-          .map((category) => getCategoryId(category))
-          .filter((id) => id != null)
-      ),
-    [visibleCategories]
+  /* --- derived: which category filter to send to the API --------------- */
+  // CHANGE #1 — Lazy loading: when activeCategory === 'all' we send NO category filter.
+  // The backend decides what "All" means and controls the page size.
+  const activeCategoryId = useMemo(() => {
+    if (activeCategory === 'all') return null;
+    const n = Number(activeCategory);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [activeCategory]);
+
+  const effectiveCategoryScopeKey = useMemo(
+    () => (activeCategoryId == null ? 'all' : `cat:${activeCategoryId}`),
+    [activeCategoryId]
   );
-
-  const effectiveCategoryIds = useMemo(() => {
-    if (activeCategory === 'all') return visibleCategoryIds;
-    return normalizeCategoryIds([activeCategory]);
-  }, [activeCategory, visibleCategoryIds]);
-
-  const effectiveCategoryScopeKey = useMemo(() => {
-    if (activeCategory === 'all') {
-      return buildCategoryScopeKey('visible-page', effectiveCategoryIds);
-    }
-    return buildCategoryScopeKey('single', effectiveCategoryIds);
-  }, [activeCategory, effectiveCategoryIds]);
 
   const currentFilterSignature = useMemo(
     () =>
@@ -227,6 +322,83 @@ export default function CashierPosPage() {
 
   const canPrevCategory = categoryPageInfo.hasPrevPage;
   const canNextCategory = categoryPageInfo.hasNextPage;
+
+  /* --- keep refs synced ----------------------------------------------- */
+  useEffect(() => {
+    billingRef.current = billing;
+  }, [billing]);
+
+  useEffect(() => {
+    cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id);
+  }, [storeId, user?.user_id]);
+
+  /* =====================================================================
+     LOCAL CART PERSISTENCE  (Requirement #3)
+     ===================================================================== */
+  // Persist any meaningful cart change to localStorage. We persist BOTH local
+  // carts (no billing_id) and the lightweight reference for server drafts.
+  useEffect(() => {
+    const key = cartStorageKeyRef.current;
+    if (!key || !hydratedFromStorageRef.current) return;
+
+    if (!billing || !billing.items?.length) {
+      safeClearCart(key);
+      return;
+    }
+
+    const snapshot = {
+      v: 1,
+      savedAt: Date.now(),
+      storeId: String(storeId || ''),
+      userId: String(user?.user_id || ''),
+      billing: {
+        billing_id: billing.billing_id || null,
+        invnumber: billing.invnumber || null,
+        is_draft: true,
+        customer_id: billing.customer_id || null,
+        notes: billing.notes || null,
+        subtotal: billing.subtotal || 0,
+        vat_amount: billing.vat_amount || 0,
+        total: billing.total || 0,
+        vat_rate: billing.vat_rate || DEFAULT_VAT_RATE,
+        items: (billing.items || []).map((it) => ({
+          billing_item_id: it.billing_item_id,
+          product_id: it.product_id,
+          product: it.product
+            ? {
+                product_id: it.product.product_id,
+                product_name: it.product.product_name,
+                sku: it.product.sku,
+                price: it.product.price,
+                vat_rate: it.product.vat_rate,
+              }
+            : null,
+          quantity: it.quantity,
+          unit_price: it.unit_price,
+          vat_rate: it.vat_rate,
+          line_subtotal: it.line_subtotal,
+          vat_amount: it.vat_amount,
+          total_amount: it.total_amount,
+          __local: !!it.__local,
+        })),
+      },
+      selectedCustomerId: selectedCustomerId || '',
+      notes: notes || '',
+    };
+
+    safeSaveCart(key, snapshot);
+  }, [billing, selectedCustomerId, notes, storeId, user?.user_id]);
+
+  /* =====================================================================
+     SYNC QUEUE — Optimistic Updates (Requirement #2)
+     Serialises every server-side mutation so adds/updates/removes never race.
+     ===================================================================== */
+  const enqueueSync = useCallback((task) => {
+    const next = syncQueueRef.current.then(task, task);
+    // ensure the chain never breaks
+    syncQueueRef.current = next.catch(() => {});
+    return next;
+  }, []);
 
   /* --- helpers -------------------------------------------------------- */
   const focusSearchInput = useCallback((selectText = false) => {
@@ -264,6 +436,7 @@ export default function CashierPosPage() {
     setNotes('');
     resetPaymentState('');
     setShowPaymentModal(false);
+    safeClearCart(cartStorageKeyRef.current);
   }, [resetPaymentState]);
 
   const resetProductState = useCallback(() => {
@@ -307,6 +480,7 @@ export default function CashierPosPage() {
 
   /* =====================================================================
      CATEGORY PAGE FETCHING (server-side pagination)
+     Only loaded for the tab strip — does NOT trigger product fetches.
      ===================================================================== */
   const buildCategoryCacheKey = useCallback(
     (page) =>
@@ -352,11 +526,7 @@ export default function CashierPosPage() {
         const meta = extractMeta(response);
         const pageInfo = buildPageInfo(meta, items, page);
 
-        categoryCacheRef.current.set(cacheKey, {
-          items,
-          pageInfo,
-          ts: Date.now(),
-        });
+        categoryCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
 
         setCategories(items);
         setCategoryPageInfo(pageInfo);
@@ -370,7 +540,6 @@ export default function CashierPosPage() {
             setError(err?.response?.data?.message || err?.message || 'Failed to load categories.');
           }
         }
-
         return { items: [], pageInfo: emptyPageInfo() };
       } finally {
         if (!silent && requestId === categoryRequestIdRef.current) {
@@ -381,16 +550,9 @@ export default function CashierPosPage() {
     [storeId, buildCategoryCacheKey]
   );
 
-  /* =====================================================================
-     STATIC DATA (customers only + first category page)
-     ===================================================================== */
   const loadStaticData = useCallback(async () => {
     if (!storeId) {
-      return {
-        categories: [],
-        categoryPageInfo: emptyPageInfo(),
-        customers: [],
-      };
+      return { categories: [], categoryPageInfo: emptyPageInfo(), customers: [] };
     }
 
     setCatalogLoading(true);
@@ -399,7 +561,7 @@ export default function CashierPosPage() {
     try {
       const [categoryResult, customersRes] = await Promise.all([
         loadCategoriesPage(1, { force: true, silent: true }),
-        customerService.list({ store_id: Number(storeId), per_page: 100 }),
+        customerService.list({ store_id: Number(storeId), per_page: 30 }),
       ]);
 
       const customerList = extractList(customersRes);
@@ -416,12 +578,7 @@ export default function CashierPosPage() {
         `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'}`
       );
       setCustomers([]);
-
-      return {
-        categories: [],
-        categoryPageInfo: emptyPageInfo(),
-        customers: [],
-      };
+      return { categories: [], categoryPageInfo: emptyPageInfo(), customers: [] };
     } finally {
       setCatalogLoading(false);
     }
@@ -429,11 +586,12 @@ export default function CashierPosPage() {
 
   /* =====================================================================
      PRODUCTS — cache key + fetch + load
+     CHANGE #1 — "All" sends NO category filter; backend owns per_page.
      ===================================================================== */
   const buildCacheKey = useCallback(
     (
       page,
-      categoryIds = effectiveCategoryIds,
+      categoryId = activeCategoryId,
       scopeKey = effectiveCategoryScopeKey,
       searchValue = debouncedSearch.trim().toLowerCase()
     ) =>
@@ -441,33 +599,23 @@ export default function CashierPosPage() {
         storeId: String(storeId || ''),
         page: Number(page || 1),
         categoryScope: scopeKey,
-        categoryIds: normalizeCategoryIds(categoryIds).join(','),
+        categoryId: categoryId ?? '',
         search: searchValue,
       }),
-    [storeId, effectiveCategoryIds, effectiveCategoryScopeKey, debouncedSearch]
+    [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]
   );
 
   const fetchProductsPage = useCallback(
-    async (page, categoryIds = effectiveCategoryIds) => {
-      const normalizedCategoryIds = normalizeCategoryIds(categoryIds);
-
-      if (!normalizedCategoryIds.length) {
-        return {
-          items: [],
-          pageInfo: emptyPageInfo(),
-        };
-      }
-
+    async (page, categoryId = activeCategoryId) => {
       const params = {
         store_id: Number(storeId),
         page,
         is_active: true,
       };
 
-      if (normalizedCategoryIds.length === 1) {
-        params.category_id = normalizedCategoryIds[0];
-      } else {
-        params.category_ids = normalizedCategoryIds.join(',');
+      // Only attach category filter when a SPECIFIC tab is selected.
+      if (categoryId != null) {
+        params.category_id = categoryId;
       }
 
       const normalizedSearch = debouncedSearch.trim();
@@ -477,21 +625,14 @@ export default function CashierPosPage() {
       const meta = extractMeta(response);
       const items = extractList(response);
       const pageInfo = buildPageInfo(meta, items, page);
-
       return { items, pageInfo };
     },
-    [storeId, debouncedSearch, effectiveCategoryIds]
+    [storeId, debouncedSearch, activeCategoryId]
   );
 
   const loadProducts = useCallback(
     async (page = 1, { force = false } = {}) => {
       if (!storeId) return;
-
-      if (!effectiveCategoryIds.length) {
-        setProducts([]);
-        setProductPageInfo(emptyPageInfo());
-        return;
-      }
 
       const cacheKey = buildCacheKey(page);
       const cached = productCacheRef.current.get(cacheKey);
@@ -500,9 +641,7 @@ export default function CashierPosPage() {
       if (!force && cached) {
         setProducts(cached.items);
         setProductPageInfo(cached.pageInfo);
-        if (page !== cached.pageInfo.currentPage) {
-          setCurrentPage(cached.pageInfo.currentPage);
-        }
+        if (page !== cached.pageInfo.currentPage) setCurrentPage(cached.pageInfo.currentPage);
         if (fresh) return;
       }
 
@@ -511,40 +650,34 @@ export default function CashierPosPage() {
 
       try {
         const { items, pageInfo } = await fetchProductsPage(page);
-
         if (requestId !== productRequestIdRef.current) return;
 
         productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
         setProducts(items);
         setProductPageInfo(pageInfo);
 
-        if (pageInfo.currentPage !== page) {
-          setCurrentPage(pageInfo.currentPage);
-        }
+        if (pageInfo.currentPage !== page) setCurrentPage(pageInfo.currentPage);
       } catch (err) {
         if (requestId !== productRequestIdRef.current) return;
         setError(err?.response?.data?.message || err?.message || 'Failed to load products.');
         setProducts([]);
         setProductPageInfo(emptyPageInfo());
       } finally {
-        if (requestId === productRequestIdRef.current) {
-          setProductsLoading(false);
-        }
+        if (requestId === productRequestIdRef.current) setProductsLoading(false);
       }
     },
-    [storeId, effectiveCategoryIds, buildCacheKey, fetchProductsPage]
+    [storeId, buildCacheKey, fetchProductsPage]
   );
 
   const prefetchNextPage = useCallback(
     async (nextPage) => {
-      if (!storeId || nextPage < 1 || !effectiveCategoryIds.length) return;
+      if (!storeId || nextPage < 1) return;
 
       const key = buildCacheKey(nextPage);
       if (prefetchedKeysRef.current.has(key)) return;
       if (productCacheRef.current.has(key)) return;
 
       prefetchedKeysRef.current.add(key);
-
       try {
         const { items, pageInfo } = await fetchProductsPage(nextPage);
         productCacheRef.current.set(key, { items, pageInfo, ts: Date.now() });
@@ -552,7 +685,7 @@ export default function CashierPosPage() {
         prefetchedKeysRef.current.delete(key);
       }
     },
-    [storeId, effectiveCategoryIds, buildCacheKey, fetchProductsPage]
+    [storeId, buildCacheKey, fetchProductsPage]
   );
 
   /* =====================================================================
@@ -589,7 +722,7 @@ export default function CashierPosPage() {
   );
 
   /* =====================================================================
-     BILLING DETAIL
+     BILLING DETAIL (server-side draft load)
      ===================================================================== */
   const loadBillingDetail = useCallback(
     async (billingId, { silent = false } = {}) => {
@@ -599,11 +732,12 @@ export default function CashierPosPage() {
       try {
         const response = await billingService.show(billingId);
         const detail = response?.data || response;
-        setBilling(detail);
+        const enriched = { ...detail, __local: false };
+        setBilling(enriched);
         setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
         setNotes(detail?.notes || '');
         mergeDraftPreview(detail);
-        return detail;
+        return enriched;
       } catch (err) {
         setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
         throw err;
@@ -615,7 +749,7 @@ export default function CashierPosPage() {
   );
 
   /* =====================================================================
-     EFFECTS
+     EFFECTS — search debouncer, success timeout, category visibility
      ===================================================================== */
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
@@ -635,18 +769,21 @@ export default function CashierPosPage() {
       (category) => String(getCategoryId(category)) === String(activeCategory)
     );
 
-    if (!stillVisible) {
-      setActiveCategory('all');
-    }
+    if (!stillVisible) setActiveCategory('all');
   }, [visibleCategories, activeCategory]);
 
   /* ----- BOOTSTRAP ---------------------------------------------------- */
+  // CHANGE #1 — On entry we load: categories page 1 (for tabs), customers,
+  // drafts (for sidebar count), and ONLY products page 1 of "All" (no
+  // category filter — the backend controls per_page).
+  // CHANGE #3 — Then we re-hydrate any in-progress cart from localStorage.
   useEffect(() => {
     if (!storeId) return;
 
     let cancelled = false;
     const bootstrapId = ++bootstrapRequestId.current;
     bootstrappedRef.current = false;
+    hydratedFromStorageRef.current = false;
 
     setError('');
     setSuccess('');
@@ -663,50 +800,21 @@ export default function CashierPosPage() {
 
     const bootstrap = async () => {
       try {
-        const [{ categories: initialCategories }] = await Promise.all([
+        await Promise.all([
           loadStaticData(),
           loadDrafts({ silent: true }),
         ]);
 
         if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
-        const initialVisibleCategoryIds = normalizeCategoryIds(
-          initialCategories
-            .map((category) => getCategoryId(category))
-            .filter((id) => id != null)
-        );
-
-        if (!initialVisibleCategoryIds.length) {
-          setProducts([]);
-          setProductPageInfo(emptyPageInfo());
-
-          lastProductFilterRef.current = JSON.stringify({
-            storeId: String(storeId),
-            categoryScope: buildCategoryScopeKey('visible-page', []),
-            search: '',
-          });
-
-          if (!cancelled && bootstrapId === bootstrapRequestId.current) {
-            bootstrappedRef.current = true;
-          }
-          return;
-        }
-
+        // Default "All" view — no category filter sent.
         setProductsLoading(true);
 
-        const params = {
+        const response = await productService.list({
           store_id: Number(storeId),
           page: 1,
           is_active: true,
-        };
-
-        if (initialVisibleCategoryIds.length === 1) {
-          params.category_id = initialVisibleCategoryIds[0];
-        } else {
-          params.category_ids = initialVisibleCategoryIds.join(',');
-        }
-
-        const response = await productService.list(params);
+        });
 
         if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
@@ -714,29 +822,64 @@ export default function CashierPosPage() {
         const items = extractList(response);
         const pageInfo = buildPageInfo(meta, items, 1);
 
-        const initialScopeKey = buildCategoryScopeKey('visible-page', initialVisibleCategoryIds);
         const cacheKey = JSON.stringify({
           storeId: String(storeId),
           page: 1,
-          categoryScope: initialScopeKey,
-          categoryIds: initialVisibleCategoryIds.join(','),
+          categoryScope: 'all',
+          categoryId: '',
           search: '',
         });
 
         productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
-
         setProducts(items);
         setProductPageInfo(pageInfo);
         setCurrentPage(1);
 
         lastProductFilterRef.current = JSON.stringify({
           storeId: String(storeId),
-          categoryScope: initialScopeKey,
+          categoryScope: 'all',
           search: '',
         });
 
         if (!cancelled && bootstrapId === bootstrapRequestId.current) {
           bootstrappedRef.current = true;
+
+          // Re-hydrate any saved cart from localStorage AFTER catalog is ready
+          const key = cartStorageKey(storeId, user?.user_id);
+          cartStorageKeyRef.current = key;
+          const saved = safeLoadCart(key);
+
+          if (saved?.billing?.items?.length) {
+            // If the saved cart references a server draft, refresh from server
+            // (it may have been paid/deleted elsewhere). Otherwise restore local.
+            if (saved.billing.billing_id) {
+              try {
+                await loadBillingDetail(saved.billing.billing_id, { silent: true });
+              } catch {
+                // Server draft gone — fall back to local snapshot
+                const restored = recalcBillingTotals({
+                  ...buildEmptyLocalBilling(),
+                  ...saved.billing,
+                  billing_id: null,
+                  __local: true,
+                });
+                setBilling(restored);
+                setSelectedCustomerId(saved.selectedCustomerId || '');
+                setNotes(saved.notes || '');
+              }
+            } else {
+              const restored = recalcBillingTotals({
+                ...buildEmptyLocalBilling(),
+                ...saved.billing,
+                __local: true,
+              });
+              setBilling(restored);
+              setSelectedCustomerId(saved.selectedCustomerId || '');
+              setNotes(saved.notes || '');
+            }
+          }
+
+          hydratedFromStorageRef.current = true;
         }
       } catch (err) {
         if (!cancelled) console.error('POS init failed:', err);
@@ -752,14 +895,16 @@ export default function CashierPosPage() {
     };
   }, [
     storeId,
+    user?.user_id,
     loadStaticData,
     loadDrafts,
+    loadBillingDetail,
     resetSale,
     resetProductState,
     resetCategoryState,
   ]);
 
-  /* ----- PRODUCTS RELOAD --------------------------------------------- */
+  /* ----- PRODUCTS RELOAD on category/search/page change --------------- */
   useEffect(() => {
     if (!storeId || !bootstrappedRef.current) return;
 
@@ -797,61 +942,242 @@ export default function CashierPosPage() {
   }, [storeLoading, catalogLoading, showPaymentModal, showDraftModal, focusSearchInput]);
 
   /* =====================================================================
-     BILLING OPERATIONS
+     OPTIMISTIC BILLING OPERATIONS  (Requirement #2)
+     Local state is updated FIRST; the server call is queued in the background.
+     If the server call fails we surface the error but keep the optimistic state
+     so the cashier never loses an in-progress sale (localStorage still has it).
      ===================================================================== */
-  const ensureDraft = async () => {
-    if (billing?.billing_id) return billing;
 
-    const response = await billingService.createDraft({
+  // Apply an item-list mutation atomically and persist to localStorage.
+  const applyBillingMutation = useCallback((mutator) => {
+    setBilling((prev) => {
+      const base = prev || buildEmptyLocalBilling();
+      const draft = { ...base, items: [...(base.items || [])] };
+      const result = mutator(draft) || draft;
+      return recalcBillingTotals(result);
+    });
+  }, []);
+
+  // Optimistic ADD / INCREMENT
+  const handleAddProduct = useCallback(
+    (product) => {
+      if (!product?.product_id) return;
+      setError('');
+
+      let wasIncrement = false;
+      let optimisticItemId = null;
+
+      applyBillingMutation((draft) => {
+        const existing = draft.items.find(
+          (it) => String(it.product_id) === String(product.product_id)
+        );
+
+        if (existing) {
+          wasIncrement = true;
+          optimisticItemId = existing.billing_item_id;
+          const newQty = Number(existing.quantity || 0) + 1;
+          const totals = calcLineFromGross(
+            newQty,
+            existing.unit_price,
+            existing.vat_rate ?? product.vat_rate ?? DEFAULT_VAT_RATE
+          );
+          Object.assign(existing, { quantity: newQty, ...totals });
+        } else {
+          const local = buildLocalItem(product, 1);
+          optimisticItemId = local.billing_item_id;
+          draft.items.push(local);
+        }
+        return draft;
+      });
+
+      // Background sync — only if we already have a server-side draft.
+      const current = billingRef.current;
+      if (!current?.billing_id) return; // pure local cart — nothing to sync yet
+
+      enqueueSync(async () => {
+        try {
+          if (wasIncrement) {
+            const liveItem = (billingRef.current?.items || []).find(
+              (it) => String(it.billing_item_id) === String(optimisticItemId)
+            );
+            if (!liveItem || liveItem.__local) return;
+            await billingService.updateItem(liveItem.billing_item_id, {
+              quantity: liveItem.quantity,
+              unit_price: liveItem.unit_price,
+            });
+          } else {
+            const created = await billingService.addItem(current.billing_id, {
+              product_id: product.product_id,
+              quantity: 1,
+              unit_price: product.price,
+            });
+            const serverItem = created?.data || created;
+            if (serverItem?.billing_item_id) {
+              setBilling((prev) => {
+                if (!prev) return prev;
+                const items = (prev.items || []).map((it) =>
+                  String(it.billing_item_id) === String(optimisticItemId)
+                    ? { ...it, billing_item_id: serverItem.billing_item_id, __local: false }
+                    : it
+                );
+                return recalcBillingTotals({ ...prev, items });
+              });
+            }
+          }
+        } catch (err) {
+          setError(err?.response?.data?.message || err?.message || 'Background sync failed (add).');
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync]
+  );
+
+  // Optimistic QUANTITY UPDATE
+  const updateItemQuantity = useCallback(
+    (item, nextQuantity) => {
+      if (!item) return;
+      if (nextQuantity < 1) {
+        // CHANGE #3 — clean removal path so no 0.00 ghost lines exist.
+        return removeItem(item.billing_item_id);
+      }
+
+      const targetId = item.billing_item_id;
+      setError('');
+
+      applyBillingMutation((draft) => {
+        const target = draft.items.find(
+          (it) => String(it.billing_item_id) === String(targetId)
+        );
+        if (!target) return draft;
+        const totals = calcLineFromGross(
+          nextQuantity,
+          target.unit_price,
+          target.vat_rate ?? DEFAULT_VAT_RATE
+        );
+        Object.assign(target, { quantity: nextQuantity, ...totals });
+        return draft;
+      });
+
+      const current = billingRef.current;
+      if (!current?.billing_id || item.__local) return;
+
+      enqueueSync(async () => {
+        try {
+          await billingService.updateItem(item.billing_item_id, {
+            quantity: nextQuantity,
+            unit_price: item.unit_price,
+          });
+        } catch (err) {
+          setError(
+            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
+          );
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync]
+  );
+
+  // Optimistic REMOVE — clean removal, no 0.00 leftovers
+  const removeItem = useCallback(
+    (billingItemId) => {
+      if (!billingItemId) return;
+      setError('');
+
+      let removedItemSnapshot = null;
+
+      applyBillingMutation((draft) => {
+        removedItemSnapshot = draft.items.find(
+          (it) => String(it.billing_item_id) === String(billingItemId)
+        );
+        draft.items = draft.items.filter(
+          (it) => String(it.billing_item_id) !== String(billingItemId)
+        );
+        return draft;
+      });
+
+      const current = billingRef.current;
+      // Local-only or no server draft → nothing to delete on backend
+      if (!current?.billing_id || !removedItemSnapshot || removedItemSnapshot.__local) return;
+
+      enqueueSync(async () => {
+        try {
+          await billingService.removeItem(billingItemId);
+        } catch (err) {
+          setError(
+            err?.response?.data?.message || err?.message || 'Background sync failed (remove).'
+          );
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync]
+  );
+
+  // Pay Now — single tap: add to cart optimistically, then open payment.
+  const handlePayNow = useCallback(
+    (product) => {
+      handleAddProduct(product);
+      // Defer modal open to the next tick so the optimistic state is committed.
+      window.requestAnimationFrame(() => {
+        const next = billingRef.current;
+        resetPaymentState(next?.total || product.price || '');
+        setShowPaymentModal(true);
+      });
+    },
+    [handleAddProduct, resetPaymentState]
+  );
+
+  /* =====================================================================
+     PROMOTING A LOCAL CART → SERVER DRAFT
+     Only triggered by explicit user action (Save Draft / Proceed to Payment).
+     ===================================================================== */
+  const promoteLocalCartToServerDraft = async () => {
+    const current = billingRef.current;
+    if (!current?.items?.length) return null;
+    if (current.billing_id) return current; // already on server
+
+    // 1) Wait for any in-flight sync to settle
+    await syncQueueRef.current.catch(() => {});
+
+    // 2) Create draft header
+    const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
       customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
       notes: notes || null,
     });
+    const created = createdRes?.data || createdRes;
+    const newId = created.billing_id;
 
-    const createdDraft = response?.data || response;
-    const detail = await loadBillingDetail(createdDraft.billing_id, { silent: true });
-    mergeDraftPreview(detail || createdDraft);
-    return detail || createdDraft;
+    // 3) Push every local item to server (sequentially to keep totals stable)
+    const snapshot = [...(current.items || [])];
+    for (const it of snapshot) {
+      try {
+        await billingService.addItem(newId, {
+          product_id: it.product_id,
+          quantity: it.quantity,
+          unit_price: it.unit_price,
+        });
+      } catch (err) {
+        console.error('Failed to sync line on promote:', err);
+      }
+    }
+
+    // 4) Refresh canonical billing from server
+    const detail = await loadBillingDetail(newId, { silent: true });
+    return detail || created;
   };
 
-  const addOrIncrementProduct = async (product) => {
-    const current = await ensureDraft();
-    const existing = current?.items?.find(
-      (item) => String(item.product_id) === String(product.product_id)
-    );
+  const persistDraftHeader = async () => {
+    const current = billingRef.current;
+    if (!current?.billing_id) return null;
 
-    if (existing) {
-      await billingService.updateItem(existing.billing_item_id, {
-        quantity: Number(existing.quantity) + 1,
-        unit_price: existing.unit_price,
-      });
-    } else {
-      await billingService.addItem(current.billing_id, {
-        product_id: product.product_id,
-        quantity: 1,
-        unit_price: product.price,
-      });
-    }
+    await billingService.update(current.billing_id, {
+      customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
+      notes: notes || null,
+    });
 
     const updatedBilling = await loadBillingDetail(current.billing_id, { silent: true });
-    setDrafts((prev) =>
-      prev.filter((item) => String(item.billing_id) !== String(current.billing_id))
-    );
+    mergeDraftPreview(updatedBilling);
     return updatedBilling;
-  };
-
-  const handleAddProduct = async (product) => {
-    if (submitting) return;
-    setError('');
-    setSubmitting(true);
-
-    try {
-      await addOrIncrementProduct(product);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to add product.');
-    } finally {
-      setSubmitting(false);
-    }
   };
 
   const openPaymentModalForBilling = (billingData) => {
@@ -859,86 +1185,29 @@ export default function CashierPosPage() {
     setShowPaymentModal(true);
   };
 
-  const handlePayNow = async (product) => {
-    if (submitting) return;
-    setError('');
-    setSubmitting(true);
-
-    try {
-      const updatedBilling = await addOrIncrementProduct(product);
-      openPaymentModalForBilling(updatedBilling);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to proceed to payment.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const updateItemQuantity = async (item, nextQuantity) => {
-    if (!billing?.billing_id) return;
-    if (nextQuantity < 1) return removeItem(item.billing_item_id);
-
-    setError('');
-    setSubmitting(true);
-
-    try {
-      await billingService.updateItem(item.billing_item_id, {
-        quantity: nextQuantity,
-        unit_price: item.unit_price,
-      });
-      const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
-      mergeDraftPreview(updatedBilling);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to update quantity.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const removeItem = async (billingItemId) => {
-    if (!billing?.billing_id) return;
-    setError('');
-    setSubmitting(true);
-
-    try {
-      await billingService.removeItem(billingItemId);
-      const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
-      mergeDraftPreview(updatedBilling);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to remove item.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const persistDraftHeader = async () => {
-    if (!billing?.billing_id) return null;
-
-    await billingService.update(billing.billing_id, {
-      customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
-      notes: notes || null,
-    });
-
-    const updatedBilling = await loadBillingDetail(billing.billing_id, { silent: true });
-    mergeDraftPreview(updatedBilling);
-    return updatedBilling;
-  };
-
   const handleSaveOrUpdateDraft = async () => {
-    if (!billing?.items?.length) return;
+    const current = billingRef.current;
+    if (!current?.items?.length) return;
     setError('');
     setSuccess('');
     setSubmitting(true);
 
     try {
-      const updatedBilling = await persistDraftHeader();
-      mergeDraftPreview(updatedBilling);
+      let finalBilling;
+      if (!current.billing_id) {
+        finalBilling = await promoteLocalCartToServerDraft();
+      } else {
+        finalBilling = await persistDraftHeader();
+      }
+
+      if (finalBilling) mergeDraftPreview(finalBilling);
+
       setSuccess(
-        updatedBilling?.billing_id
-          ? `Draft #${updatedBilling.billing_id} updated successfully.`
+        finalBilling?.billing_id
+          ? `Draft #${finalBilling.billing_id} saved successfully.`
           : 'Draft saved successfully.'
       );
-      resetSale();
+      resetSale(); // also clears localStorage
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
     } finally {
@@ -947,14 +1216,23 @@ export default function CashierPosPage() {
   };
 
   const handleProceedToPayment = async () => {
-    if (!billing?.items?.length) return;
+    const current = billingRef.current;
+    if (!current?.items?.length) return;
     setError('');
+    setSubmitting(true);
 
     try {
-      const currentBilling = await persistDraftHeader();
-      openPaymentModalForBilling(currentBilling || billing);
+      let target = current;
+      if (!current.billing_id) {
+        target = await promoteLocalCartToServerDraft();
+      } else {
+        target = (await persistDraftHeader()) || current;
+      }
+      openPaymentModalForBilling(target);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to open payment.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -969,12 +1247,10 @@ export default function CashierPosPage() {
       setError('Please select a payment method.');
       return false;
     }
-
     if (!amountReceived || Number(amountReceived) <= 0) {
       setError('Please enter a valid amount received.');
       return false;
     }
-
     if (paymentMethod === 'mpesa') {
       if (!mpesaPhone.trim()) {
         setError('Please enter MPESA phone number.');
@@ -985,17 +1261,16 @@ export default function CashierPosPage() {
         return false;
       }
     }
-
     if (paymentMethod === 'card' && !cardReference.trim()) {
       setError('Please enter card reference.');
       return false;
     }
-
     return true;
   };
 
   const handleCharge = async () => {
-    if (!billing?.billing_id || !billing?.items?.length) return;
+    const current = billingRef.current;
+    if (!current?.items?.length) return;
     if (!validatePayment()) return;
 
     setSubmitting(true);
@@ -1003,9 +1278,12 @@ export default function CashierPosPage() {
     setSuccess('');
 
     try {
-      await persistDraftHeader();
+      // Ensure we have a server-side draft, then persist header.
+      let target = current;
+      if (!current.billing_id) target = await promoteLocalCartToServerDraft();
+      else target = (await persistDraftHeader()) || current;
 
-      await billingService.charge(billing.billing_id, {
+      await billingService.charge(target.billing_id, {
         payment_method: paymentMethod,
         amount_received: Number(amountReceived || 0),
         amount_tendered:
@@ -1018,13 +1296,13 @@ export default function CashierPosPage() {
         card_holder: paymentMethod === 'card' ? cardHolder || null : null,
       });
 
-      const paidResponse = await billingService.show(billing.billing_id);
+      const paidResponse = await billingService.show(target.billing_id);
       const paidBilling = paidResponse?.data || paidResponse;
 
       openBillingPrint(paidBilling, currentStore, 'receipt', printSettings);
 
-      removeDraftPreview(billing.billing_id);
-      resetSale();
+      removeDraftPreview(target.billing_id);
+      resetSale(); // clears localStorage
       setShowPaymentModal(false);
       setSuccess('Payment processed successfully.');
       focusSearchInput(true);
@@ -1040,6 +1318,8 @@ export default function CashierPosPage() {
     setSubmitting(true);
 
     try {
+      // Discard current local cart so storage doesn't fight the new draft
+      safeClearCart(cartStorageKeyRef.current);
       await loadBillingDetail(draftId);
       setShowDraftModal(false);
       setShowPaymentModal(false);
@@ -1060,7 +1340,8 @@ export default function CashierPosPage() {
 
     try {
       await deleteBillingRecord(draftId);
-      if (String(billing?.billing_id) === String(draftId)) resetSale();
+      const current = billingRef.current;
+      if (String(current?.billing_id) === String(draftId)) resetSale();
       removeDraftPreview(draftId);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to delete draft.');
@@ -1077,14 +1358,14 @@ export default function CashierPosPage() {
       focusSearchInput(true);
       return;
     }
-
     if (showDraftModal) {
       setShowDraftModal(false);
       focusSearchInput(true);
       return;
     }
 
-    if (!billing?.billing_id && !billing?.items?.length && !search) {
+    const current = billingRef.current;
+    if (!current?.billing_id && !current?.items?.length && !search) {
       focusSearchInput(true);
       return;
     }
@@ -1096,9 +1377,9 @@ export default function CashierPosPage() {
     setSubmitting(true);
 
     try {
-      if (billing?.billing_id) {
-        await deleteBillingRecord(billing.billing_id);
-        removeDraftPreview(billing.billing_id);
+      if (current?.billing_id) {
+        await deleteBillingRecord(current.billing_id);
+        removeDraftPreview(current.billing_id);
       }
       resetSale();
       setSearch('');
@@ -1112,7 +1393,6 @@ export default function CashierPosPage() {
     submitting,
     showPaymentModal,
     showDraftModal,
-    billing,
     search,
     focusSearchInput,
     removeDraftPreview,
@@ -1133,7 +1413,7 @@ export default function CashierPosPage() {
 
       if (event.key === 'F8') {
         event.preventDefault();
-        if (!submitting && billing?.items?.length) void handleSaveOrUpdateDraft();
+        if (!submitting && billingRef.current?.items?.length) void handleSaveOrUpdateDraft();
         return;
       }
 
@@ -1150,7 +1430,7 @@ export default function CashierPosPage() {
         !showPaymentModal &&
         !showDraftModal;
 
-      if (wantsCheckout && !submitting && billing?.items?.length) {
+      if (wantsCheckout && !submitting && billingRef.current?.items?.length) {
         event.preventDefault();
         void handleProceedToPayment();
       }
@@ -1158,7 +1438,7 @@ export default function CashierPosPage() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [billing, submitting, showPaymentModal, showDraftModal, focusSearchInput, handleEscapeShortcut]);
+  }, [submitting, showPaymentModal, showDraftModal, focusSearchInput, handleEscapeShortcut]);
 
   /* =====================================================================
      DERIVED RENDER VALUES
@@ -1257,9 +1537,6 @@ export default function CashierPosPage() {
     );
   }
 
-  /* =====================================================================
-     RENDER
-     ===================================================================== */
   return (
     <>
       <section className="pos-grid cashier-pos-page">
@@ -1315,7 +1592,6 @@ export default function CashierPosPage() {
                 type="button"
                 className={`chip ${activeCategory === 'all' ? 'active' : ''}`}
                 onClick={() => setActiveCategory('all')}
-                disabled={!visibleCategories.length}
               >
                 All
               </button>
@@ -1356,16 +1632,10 @@ export default function CashierPosPage() {
                 >
                   {categoryPageInfo.currentPage}/{categoryPageInfo.lastPage}
                   <span style={{ marginLeft: 6, opacity: 0.8 }}>
-                    ({categoryPageInfo.perPage} per page)
+                    {categoryPageInfo.total}
                   </span>
                 </span>
               )}
-
-              {categoriesLoading ? (
-                <span className="muted" style={{ fontSize: 12 }}>
-                  Loading categories...
-                </span>
-              ) : null}
             </div>
           </div>
 
@@ -1405,7 +1675,6 @@ export default function CashierPosPage() {
                           <button
                             type="button"
                             className="ghost-button add-btn"
-                            disabled={submitting}
                             onClick={() => handleAddProduct(product)}
                           >
                             Add
@@ -1475,7 +1744,10 @@ export default function CashierPosPage() {
               <div>
                 <h3>Current billing</h3>
                 <p className="invoice-subtext">
-                  {billing ? billing.invnumber || `Draft #${billing.billing_id}` : 'No active billing yet'}
+                  {billing
+                    ? billing.invnumber ||
+                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                    : 'No active billing yet'}
                 </p>
               </div>
               <div className="cart-badge">
@@ -1603,7 +1875,6 @@ export default function CashierPosPage() {
                           type="button"
                           className="icon-button"
                           onClick={() => updateItemQuantity(item, Number(item.quantity) - 1)}
-                          disabled={submitting}
                         >
                           <Minus size={14} />
                         </button>
@@ -1612,7 +1883,6 @@ export default function CashierPosPage() {
                           type="button"
                           className="icon-button"
                           onClick={() => updateItemQuantity(item, Number(item.quantity) + 1)}
-                          disabled={submitting}
                         >
                           <Plus size={14} />
                         </button>
@@ -1624,7 +1894,6 @@ export default function CashierPosPage() {
                         type="button"
                         className="icon-button danger-icon"
                         onClick={() => removeItem(item.billing_item_id)}
-                        disabled={submitting}
                       >
                         <Trash2 size={14} />
                       </button>
@@ -1645,7 +1914,7 @@ export default function CashierPosPage() {
                   </span>
                 </div>
                 <div className="summary-row">
-                  <span className="summary-label">VAT ({Number(billing?.vat_rate || 16)}%)</span>
+                  <span className="summary-label">VAT ({Number(billing?.vat_rate || DEFAULT_VAT_RATE)}%)</span>
                   <span className="summary-value">
                     {currency(billing?.vat_amount || 0, currentStore?.currency)}
                   </span>
