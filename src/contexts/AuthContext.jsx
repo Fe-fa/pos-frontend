@@ -1,9 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useEffect, useMemo, useState } from 'react';
 import { storageKeys } from '../lib/api';
 import { authService } from '../services/authService';
 import { readJSON, userHasStoreAssignment, writeJSON } from '../utils/helpers';
 
-const AuthContext = createContext(null);
+export const AuthContext = createContext(null);
+export { useAuth } from '../hooks/useAuth';
+
+let inflightProfileFetch = null;
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(readJSON(storageKeys.user, null));
@@ -13,11 +16,17 @@ export function AuthProvider({ children }) {
     localStorage.removeItem(storageKeys.token);
     localStorage.removeItem(storageKeys.user);
     localStorage.removeItem(storageKeys.storeId);
+    inflightProfileFetch = null;
     setUser(null);
   }, []);
 
   const refreshProfile = useCallback(async () => {
-    const response = await authService.me();
+    if (!inflightProfileFetch) {
+      inflightProfileFetch = authService.me().finally(() => {
+        inflightProfileFetch = null;
+      });
+    }
+    const response = await inflightProfileFetch;
     writeJSON(storageKeys.user, response.user);
     setUser(response.user);
     return response.user;
@@ -25,11 +34,7 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const token = localStorage.getItem(storageKeys.token);
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-
+    if (!token) { setLoading(false); return; }
     refreshProfile()
       .catch(() => clearSession())
       .finally(() => setLoading(false));
@@ -46,11 +51,7 @@ export function AuthProvider({ children }) {
   const register = async (payload) => authService.register(payload);
 
   const logout = async () => {
-    try {
-      await authService.logout();
-    } catch {
-      // ignore logout errors
-    }
+    try { await authService.logout(); } catch {}
     clearSession();
   };
 
@@ -68,10 +69,4 @@ export function AuthProvider({ children }) {
   }), [clearSession, loading, refreshProfile, user]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within AuthProvider');
-  return context;
 }

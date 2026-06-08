@@ -15,6 +15,7 @@ const api = axios.create({
   },
 });
 
+// Request Interceptor
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem(storageKeys.token);
   const storeId = localStorage.getItem(storageKeys.storeId);
@@ -27,15 +28,36 @@ api.interceptors.request.use((config) => {
     config.headers['X-Store-Id'] = storeId;
   }
 
-  // --- THE FIX ---
-  // If we are sending FormData (file uploads), remove the default JSON Content-Type.
-  // This allows Axios/the browser to auto-detect and set the correct multi-part boundary.
   if (config.data instanceof FormData) {
     delete config.headers['Content-Type'];
   }
 
+  // --- DEBUG LOGGER ---
+  // Tracks method, URL, and any X-Store-Id headers attached to active calls
+  console.log(
+    `%c[🚀 API REQUEST] ${config.method?.toUpperCase()} ➡️ ${config.url}`,
+    'color: #00bfff; font-weight: bold;',
+    { storeId: config.headers['X-Store-Id'] || 'None Assigned' }
+  );
+
   return config;
 }, (error) => {
+  return Promise.reject(error);
+});
+
+// Response Interceptor (Added to catch and debug incoming errors immediately)
+api.interceptors.response.use((response) => {
+  return response;
+}, (error) => {
+  console.error(
+    `%c[❌ API ERROR] From ${error.config?.url || 'Unknown URL'}`,
+    'color: #ff4747; font-weight: bold;',
+    {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    }
+  );
   return Promise.reject(error);
 });
 

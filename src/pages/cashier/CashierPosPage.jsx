@@ -47,6 +47,7 @@ const extractList = (res) => {
   return [];
 };
 
+
 const extractMeta = (res) => res?.meta || res?.data?.meta || {};
 
 const getCategoryId = (category) =>
@@ -235,6 +236,8 @@ export default function CashierPosPage() {
 
   /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
+  
+  const bootstrapProductsFetchedRef = useRef(false);
 
   const categoryCacheRef = useRef(new Map());
   const categoryRequestIdRef = useRef(0);
@@ -247,11 +250,24 @@ export default function CashierPosPage() {
   const bootstrappedRef = useRef(false);
   const bootstrapRequestId = useRef(0);
 
-  // Background-sync queue: serialise all server mutations on the active billing.
   const syncQueueRef = useRef(Promise.resolve());
-  const billingRef = useRef(null);              // always-current billing snapshot for handlers
-  const cartStorageKeyRef = useRef('');          // current localStorage key
-  const hydratedFromStorageRef = useRef(false);  // restore-from-LS only once per session
+  const billingRef = useRef(null);
+  const cartStorageKeyRef = useRef('');
+  const hydratedFromStorageRef = useRef(false);
+
+  // ✅ FIX #1: Always-current filter ref — read synchronously in callbacks
+  const productFiltersRef = useRef({
+    storeId: '',
+    activeCategoryId: null,
+    scopeKey: 'all',
+    search: '',
+  });
+
+  // ✅ FIX #2: Bootstrap callback refs assigned DURING RENDER (not in effects)
+  // This eliminates the 1-render lag that caused double bootstrap fires.
+  const loadStaticDataRef = useRef(null);
+  const loadDraftsRef = useRef(null);
+  const loadBillingDetailRef = useRef(null);
 
   /* --- state ---------------------------------------------------------- */
   const [categories, setCategories] = useState([]);
@@ -291,14 +307,14 @@ export default function CashierPosPage() {
   const [billingLoading, setBillingLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  // ✅ FIX #3: catalogReady gates prefetch — prevents it racing bootstrap
+  const [catalogReady, setCatalogReady] = useState(false);
+
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
   const visibleCategories = categories;
 
-  /* --- derived: which category filter to send to the API --------------- */
-  // CHANGE #1 — Lazy loading: when activeCategory === 'all' we send NO category filter.
-  // The backend decides what "All" means and controls the page size.
   const activeCategoryId = useMemo(() => {
     if (activeCategory === 'all') return null;
     const n = Number(activeCategory);
@@ -323,20 +339,19 @@ export default function CashierPosPage() {
   const canPrevCategory = categoryPageInfo.hasPrevPage;
   const canNextCategory = categoryPageInfo.hasNextPage;
 
-  /* --- keep refs synced ----------------------------------------------- */
+  // Sync refs every render — no useEffect lag
+  useEffect(() => { billingRef.current = billing; }, [billing]);
+  useEffect(() => { cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id); }, [storeId, user?.user_id]);
   useEffect(() => {
-    billingRef.current = billing;
-  }, [billing]);
+    productFiltersRef.current = {
+      storeId: String(storeId || ''),
+      activeCategoryId,
+      scopeKey: effectiveCategoryScopeKey,
+      search: debouncedSearch.trim().toLowerCase(),
+    };
+  }, [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]);
 
-  useEffect(() => {
-    cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id);
-  }, [storeId, user?.user_id]);
-
-  /* =====================================================================
-     LOCAL CART PERSISTENCE  (Requirement #3)
-     ===================================================================== */
-  // Persist any meaningful cart change to localStorage. We persist BOTH local
-  // carts (no billing_id) and the lightweight reference for server drafts.
+  // localStorage cart persistence
   useEffect(() => {
     const key = cartStorageKeyRef.current;
     if (!key || !hydratedFromStorageRef.current) return;
@@ -390,12 +405,10 @@ export default function CashierPosPage() {
   }, [billing, selectedCustomerId, notes, storeId, user?.user_id]);
 
   /* =====================================================================
-     SYNC QUEUE — Optimistic Updates (Requirement #2)
-     Serialises every server-side mutation so adds/updates/removes never race.
+     SYNC QUEUE
      ===================================================================== */
   const enqueueSync = useCallback((task) => {
     const next = syncQueueRef.current.then(task, task);
-    // ensure the chain never breaks
     syncQueueRef.current = next.catch(() => {});
     return next;
   }, []);
@@ -479,8 +492,7 @@ export default function CashierPosPage() {
   };
 
   /* =====================================================================
-     CATEGORY PAGE FETCHING (server-side pagination)
-     Only loaded for the tab strip — does NOT trigger product fetches.
+     CATEGORY PAGE FETCHING
      ===================================================================== */
   const buildCategoryCacheKey = useCallback(
     (page) =>
@@ -527,7 +539,6 @@ export default function CashierPosPage() {
         const pageInfo = buildPageInfo(meta, items, page);
 
         categoryCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
-
         setCategories(items);
         setCategoryPageInfo(pageInfo);
 
@@ -585,40 +596,40 @@ export default function CashierPosPage() {
   }, [storeId, loadCategoriesPage]);
 
   /* =====================================================================
-     PRODUCTS — cache key + fetch + load
-     CHANGE #1 — "All" sends NO category filter; backend owns per_page.
+     PRODUCTS
      ===================================================================== */
+  // ✅ Stable forever — reads from ref, no deps
   const buildCacheKey = useCallback(
     (
       page,
-      categoryId = activeCategoryId,
-      scopeKey = effectiveCategoryScopeKey,
-      searchValue = debouncedSearch.trim().toLowerCase()
+      categoryId = productFiltersRef.current.activeCategoryId,
+      scopeKey = productFiltersRef.current.scopeKey,
+      searchValue = productFiltersRef.current.search,
     ) =>
       JSON.stringify({
-        storeId: String(storeId || ''),
+        storeId: productFiltersRef.current.storeId,
         page: Number(page || 1),
         categoryScope: scopeKey,
         categoryId: categoryId ?? '',
         search: searchValue,
       }),
-    [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]
+    []
   );
 
+  // ✅ Stable — reads from ref, no deps
   const fetchProductsPage = useCallback(
-    async (page, categoryId = activeCategoryId) => {
+    async (page, categoryId = productFiltersRef.current.activeCategoryId) => {
+      const { storeId: sid, search } = productFiltersRef.current;
+
       const params = {
-        store_id: Number(storeId),
+        store_id: Number(sid),
         page,
         is_active: true,
       };
 
-      // Only attach category filter when a SPECIFIC tab is selected.
-      if (categoryId != null) {
-        params.category_id = categoryId;
-      }
+      if (categoryId != null) params.category_id = categoryId;
 
-      const normalizedSearch = debouncedSearch.trim();
+      const normalizedSearch = search.trim();
       if (normalizedSearch) params.search = normalizedSearch;
 
       const response = await productService.list(params);
@@ -627,7 +638,7 @@ export default function CashierPosPage() {
       const pageInfo = buildPageInfo(meta, items, page);
       return { items, pageInfo };
     },
-    [storeId, debouncedSearch, activeCategoryId]
+    [] // ✅ stable forever
   );
 
   const loadProducts = useCallback(
@@ -641,8 +652,7 @@ export default function CashierPosPage() {
       if (!force && cached) {
         setProducts(cached.items);
         setProductPageInfo(cached.pageInfo);
-        if (page !== cached.pageInfo.currentPage) setCurrentPage(cached.pageInfo.currentPage);
-        if (fresh) return;
+        if (fresh) return; // ✅ serve from cache instantly, no setCurrentPage thrash
       }
 
       setProductsLoading(true);
@@ -655,8 +665,6 @@ export default function CashierPosPage() {
         productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
         setProducts(items);
         setProductPageInfo(pageInfo);
-
-        if (pageInfo.currentPage !== page) setCurrentPage(pageInfo.currentPage);
       } catch (err) {
         if (requestId !== productRequestIdRef.current) return;
         setError(err?.response?.data?.message || err?.message || 'Failed to load products.');
@@ -722,7 +730,7 @@ export default function CashierPosPage() {
   );
 
   /* =====================================================================
-     BILLING DETAIL (server-side draft load)
+     BILLING DETAIL
      ===================================================================== */
   const loadBillingDetail = useCallback(
     async (billingId, { silent = false } = {}) => {
@@ -747,6 +755,13 @@ export default function CashierPosPage() {
     },
     [mergeDraftPreview]
   );
+
+  // ✅ FIX #2: Assign refs synchronously during render — NOT in useEffect.
+  // This guarantees bootstrap always calls the latest version of each function
+  // and eliminates the stale-closure double-fire seen in the logs.
+  loadStaticDataRef.current = loadStaticData;
+  loadDraftsRef.current = loadDrafts;
+  loadBillingDetailRef.current = loadBillingDetail;
 
   /* =====================================================================
      EFFECTS — search debouncer, success timeout, category visibility
@@ -773,17 +788,16 @@ export default function CashierPosPage() {
   }, [visibleCategories, activeCategory]);
 
   /* ----- BOOTSTRAP ---------------------------------------------------- */
-  // CHANGE #1 — On entry we load: categories page 1 (for tabs), customers,
-  // drafts (for sidebar count), and ONLY products page 1 of "All" (no
-  // category filter — the backend controls per_page).
-  // CHANGE #3 — Then we re-hydrate any in-progress cart from localStorage.
   useEffect(() => {
     if (!storeId) return;
 
     let cancelled = false;
     const bootstrapId = ++bootstrapRequestId.current;
+
+    // Reset all volatile state
     bootstrappedRef.current = false;
     hydratedFromStorageRef.current = false;
+    setCatalogReady(false); // ✅ FIX #3: block prefetch during bootstrap
 
     setError('');
     setSuccess('');
@@ -800,14 +814,22 @@ export default function CashierPosPage() {
 
     const bootstrap = async () => {
       try {
+        // ✅ Run static data + drafts in parallel — they don't depend on each other
         await Promise.all([
-          loadStaticData(),
-          loadDrafts({ silent: true }),
+          loadStaticDataRef.current(),
+          loadDraftsRef.current({ silent: true }),
         ]);
 
         if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
-        // Default "All" view — no category filter sent.
+        // ✅ Set filter ref before fetching so buildCacheKey key matches exactly
+        productFiltersRef.current = {
+          storeId: String(storeId || ''),
+          activeCategoryId: null,
+          scopeKey: 'all',
+          search: '',
+        };
+
         setProductsLoading(true);
 
         const response = await productService.list({
@@ -822,6 +844,7 @@ export default function CashierPosPage() {
         const items = extractList(response);
         const pageInfo = buildPageInfo(meta, items, 1);
 
+        // ✅ Cache key must exactly match what buildCacheKey() produces for page 1 / all
         const cacheKey = JSON.stringify({
           storeId: String(storeId),
           page: 1,
@@ -835,6 +858,9 @@ export default function CashierPosPage() {
         setProductPageInfo(pageInfo);
         setCurrentPage(1);
 
+        bootstrapProductsFetchedRef.current = true;
+
+        // ✅ Set lastProductFilterRef BEFORE bootstrappedRef so reload effect skips on mount
         lastProductFilterRef.current = JSON.stringify({
           storeId: String(storeId),
           categoryScope: 'all',
@@ -844,19 +870,19 @@ export default function CashierPosPage() {
         if (!cancelled && bootstrapId === bootstrapRequestId.current) {
           bootstrappedRef.current = true;
 
-          // Re-hydrate any saved cart from localStorage AFTER catalog is ready
+          // ✅ FIX #3: Signal catalog is ready — prefetch effect can now fire
+          setCatalogReady(true);
+
+          // Re-hydrate saved cart from localStorage
           const key = cartStorageKey(storeId, user?.user_id);
           cartStorageKeyRef.current = key;
           const saved = safeLoadCart(key);
 
           if (saved?.billing?.items?.length) {
-            // If the saved cart references a server draft, refresh from server
-            // (it may have been paid/deleted elsewhere). Otherwise restore local.
             if (saved.billing.billing_id) {
               try {
-                await loadBillingDetail(saved.billing.billing_id, { silent: true });
+                await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
               } catch {
-                // Server draft gone — fall back to local snapshot
                 const restored = recalcBillingTotals({
                   ...buildEmptyLocalBilling(),
                   ...saved.billing,
@@ -893,62 +919,59 @@ export default function CashierPosPage() {
     return () => {
       cancelled = true;
     };
-  }, [
-    storeId,
-    user?.user_id,
-    loadStaticData,
-    loadDrafts,
-    loadBillingDetail,
-    resetSale,
-    resetProductState,
-    resetCategoryState,
-  ]);
+  }, [storeId, user?.user_id]); // ✅ Minimal deps — callbacks read via stable refs
 
-  /* ----- PRODUCTS RELOAD on category/search/page change --------------- */
-  useEffect(() => {
-    if (!storeId || !bootstrappedRef.current) return;
+/* ----- PRODUCTS RELOAD on category/search/page change --------------- */
+useEffect(() => {
+  if (!storeId || !bootstrappedRef.current || !catalogReady) return;
 
-    const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
+  // ✅ Skip the first trigger after bootstrap — products already loaded
+  if (bootstrapProductsFetchedRef.current) {
+    bootstrapProductsFetchedRef.current = false;
+    return;
+  }
 
-    if (filtersChanged) {
-      prefetchedKeysRef.current.clear();
+  const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
-      if (currentPage !== 1) {
-        setCurrentPage(1);
-        lastProductFilterRef.current = currentFilterSignature;
-        return;
-      }
+  if (filtersChanged) {
+    prefetchedKeysRef.current.clear();
 
+    if (currentPage !== 1) {
+      setCurrentPage(1);
       lastProductFilterRef.current = currentFilterSignature;
-      void loadProducts(1);
       return;
     }
 
-    void loadProducts(currentPage);
-  }, [storeId, currentPage, currentFilterSignature, loadProducts]);
+    lastProductFilterRef.current = currentFilterSignature;
+    void loadProducts(1);
+    return;
+  }
+
+  // Skip page 1 when filters unchanged — bootstrap already loaded it
+  if (currentPage === 1) return;
+
+  void loadProducts(currentPage);
+}, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady]);
 
   /* ----- PRODUCT PREFETCH -------------------------------------------- */
   useEffect(() => {
-    if (productPageInfo.hasNextPage) {
-      void prefetchNextPage(productPageInfo.currentPage + 1);
-    }
-  }, [productPageInfo.currentPage, productPageInfo.hasNextPage, prefetchNextPage]);
+    // ✅ FIX #3: catalogReady prevents prefetch from racing bootstrap
+    if (!bootstrappedRef.current || !catalogReady) return;
+    if (productsLoading) return;
+    if (!productPageInfo.hasNextPage) return;
 
-  /* ----- FOCUS SEARCH WHEN IDLE -------------------------------------- */
-  useEffect(() => {
-    if (!storeLoading && !catalogLoading && !showPaymentModal && !showDraftModal) {
-      focusSearchInput();
-    }
-  }, [storeLoading, catalogLoading, showPaymentModal, showDraftModal, focusSearchInput]);
+    void prefetchNextPage(productPageInfo.currentPage + 1);
+  }, [
+    productPageInfo.currentPage,
+    productPageInfo.hasNextPage,
+    prefetchNextPage,
+    productsLoading,
+    catalogReady, // ✅ added
+  ]);
 
   /* =====================================================================
-     OPTIMISTIC BILLING OPERATIONS  (Requirement #2)
-     Local state is updated FIRST; the server call is queued in the background.
-     If the server call fails we surface the error but keep the optimistic state
-     so the cashier never loses an in-progress sale (localStorage still has it).
+     BILLING MUTATIONS
      ===================================================================== */
-
-  // Apply an item-list mutation atomically and persist to localStorage.
   const applyBillingMutation = useCallback((mutator) => {
     setBilling((prev) => {
       const base = prev || buildEmptyLocalBilling();
@@ -958,7 +981,6 @@ export default function CashierPosPage() {
     });
   }, []);
 
-  // Optimistic ADD / INCREMENT
   const handleAddProduct = useCallback(
     (product) => {
       if (!product?.product_id) return;
@@ -990,9 +1012,8 @@ export default function CashierPosPage() {
         return draft;
       });
 
-      // Background sync — only if we already have a server-side draft.
       const current = billingRef.current;
-      if (!current?.billing_id) return; // pure local cart — nothing to sync yet
+      if (!current?.billing_id) return;
 
       enqueueSync(async () => {
         try {
@@ -1032,14 +1053,10 @@ export default function CashierPosPage() {
     [applyBillingMutation, enqueueSync]
   );
 
-  // Optimistic QUANTITY UPDATE
   const updateItemQuantity = useCallback(
     (item, nextQuantity) => {
       if (!item) return;
-      if (nextQuantity < 1) {
-        // CHANGE #3 — clean removal path so no 0.00 ghost lines exist.
-        return removeItem(item.billing_item_id);
-      }
+      if (nextQuantity < 1) return removeItem(item.billing_item_id);
 
       const targetId = item.billing_item_id;
       setError('');
@@ -1077,7 +1094,6 @@ export default function CashierPosPage() {
     [applyBillingMutation, enqueueSync]
   );
 
-  // Optimistic REMOVE — clean removal, no 0.00 leftovers
   const removeItem = useCallback(
     (billingItemId) => {
       if (!billingItemId) return;
@@ -1096,7 +1112,6 @@ export default function CashierPosPage() {
       });
 
       const current = billingRef.current;
-      // Local-only or no server draft → nothing to delete on backend
       if (!current?.billing_id || !removedItemSnapshot || removedItemSnapshot.__local) return;
 
       enqueueSync(async () => {
@@ -1112,11 +1127,9 @@ export default function CashierPosPage() {
     [applyBillingMutation, enqueueSync]
   );
 
-  // Pay Now — single tap: add to cart optimistically, then open payment.
   const handlePayNow = useCallback(
     (product) => {
       handleAddProduct(product);
-      // Defer modal open to the next tick so the optimistic state is committed.
       window.requestAnimationFrame(() => {
         const next = billingRef.current;
         resetPaymentState(next?.total || product.price || '');
@@ -1127,18 +1140,15 @@ export default function CashierPosPage() {
   );
 
   /* =====================================================================
-     PROMOTING A LOCAL CART → SERVER DRAFT
-     Only triggered by explicit user action (Save Draft / Proceed to Payment).
+     DRAFT PROMOTION / PAYMENT
      ===================================================================== */
   const promoteLocalCartToServerDraft = async () => {
     const current = billingRef.current;
     if (!current?.items?.length) return null;
-    if (current.billing_id) return current; // already on server
+    if (current.billing_id) return current;
 
-    // 1) Wait for any in-flight sync to settle
     await syncQueueRef.current.catch(() => {});
 
-    // 2) Create draft header
     const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
       customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
@@ -1147,7 +1157,6 @@ export default function CashierPosPage() {
     const created = createdRes?.data || createdRes;
     const newId = created.billing_id;
 
-    // 3) Push every local item to server (sequentially to keep totals stable)
     const snapshot = [...(current.items || [])];
     for (const it of snapshot) {
       try {
@@ -1161,7 +1170,6 @@ export default function CashierPosPage() {
       }
     }
 
-    // 4) Refresh canonical billing from server
     const detail = await loadBillingDetail(newId, { silent: true });
     return detail || created;
   };
@@ -1207,7 +1215,7 @@ export default function CashierPosPage() {
           ? `Draft #${finalBilling.billing_id} saved successfully.`
           : 'Draft saved successfully.'
       );
-      resetSale(); // also clears localStorage
+      resetSale();
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
     } finally {
@@ -1278,7 +1286,6 @@ export default function CashierPosPage() {
     setSuccess('');
 
     try {
-      // Ensure we have a server-side draft, then persist header.
       let target = current;
       if (!current.billing_id) target = await promoteLocalCartToServerDraft();
       else target = (await persistDraftHeader()) || current;
@@ -1302,7 +1309,7 @@ export default function CashierPosPage() {
       openBillingPrint(paidBilling, currentStore, 'receipt', printSettings);
 
       removeDraftPreview(target.billing_id);
-      resetSale(); // clears localStorage
+      resetSale();
       setShowPaymentModal(false);
       setSuccess('Payment processed successfully.');
       focusSearchInput(true);
@@ -1318,7 +1325,6 @@ export default function CashierPosPage() {
     setSubmitting(true);
 
     try {
-      // Discard current local cart so storage doesn't fight the new draft
       safeClearCart(cartStorageKeyRef.current);
       await loadBillingDetail(draftId);
       setShowDraftModal(false);
@@ -1484,13 +1490,17 @@ export default function CashierPosPage() {
      PAGINATION HANDLERS
      ===================================================================== */
   const goToPreviousPage = () => {
-    if (!productPageInfo.hasPrevPage || productsLoading) return;
-    setCurrentPage((prev) => Math.max(prev - 1, 1));
+    if (productsLoading) return;
+    const prevPage = productPageInfo.currentPage - 1;
+    if (prevPage < 1) return;
+    setCurrentPage(prevPage);
   };
 
   const goToNextPage = () => {
-    if (!productPageInfo.hasNextPage || productsLoading) return;
-    setCurrentPage((prev) => Math.min(prev + 1, productPageInfo.lastPage || prev + 1));
+    if (productsLoading) return;
+    const nextPage = productPageInfo.currentPage + 1;
+    if (nextPage > productPageInfo.lastPage) return;
+    setCurrentPage(nextPage);
   };
 
   const goToPrevCategoryPage = async () => {
@@ -1713,7 +1723,7 @@ export default function CashierPosPage() {
                       type="button"
                       className="ghost-button pagination-btn"
                       onClick={goToPreviousPage}
-                      disabled={!productPageInfo.hasPrevPage || productsLoading}
+                      disabled={productPageInfo.currentPage <= 1 || productsLoading}
                     >
                       Previous
                     </button>
@@ -1727,7 +1737,7 @@ export default function CashierPosPage() {
                       type="button"
                       className="ghost-button pagination-btn"
                       onClick={goToNextPage}
-                      disabled={!productPageInfo.hasNextPage || productsLoading}
+                      disabled={productPageInfo.currentPage >= productPageInfo.lastPage || productsLoading}
                     >
                       Next
                     </button>
