@@ -30,7 +30,7 @@ const adminNavItems = [
   { to: '/admin/billings', label: 'Billings', icon: ReceiptText },
   { to: '/admin/orders', label: 'Orders', icon: ShoppingBasket },
   { to: '/admin/settings', label: 'Settings', icon: Settings },
-  { to: '/admin/access-control', label: 'Access Control', icon: Users },
+  // { to: '/admin/access-control', label: 'Access Control', icon: Users },
 ];
 
 const managerNavItems = [
@@ -87,6 +87,10 @@ export default function AdminLayout() {
               <span>{label}</span>
             </NavLink>
           ))}
+                        <button className="ghost-button" onClick={handleLogout}>
+                <LogOut size={16} />
+                Logout
+              </button>
         </nav>
       </aside>
 
@@ -123,11 +127,6 @@ export default function AdminLayout() {
 
               <button className="icon-button" title="Notifications">
                 <Bell size={18} />
-              </button>
-
-              <button className="ghost-button" onClick={handleLogout}>
-                <LogOut size={16} />
-                Logout
               </button>
             </div>
           </header>

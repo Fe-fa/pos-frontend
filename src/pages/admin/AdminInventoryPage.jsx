@@ -349,7 +349,7 @@ export default function AdminInventoryPage() {
     setForm({
       product_id: row.product_id,
       batch_no: row.batch_no || '',
-      quantity: row.quantity,
+      quantity: '',          // ← was row.quantity; blank so user types the top-up amount
       reorder_level: row.reorder_level || 0,
     });
     setError('');
@@ -803,15 +803,16 @@ export default function AdminInventoryPage() {
                     placeholder="e.g. BATCH-2026-001"
                     value={form.batch_no}
                     onChange={(e) => setForm({ ...form, batch_no: e.target.value })}
+                    disabled={Boolean(editingId)}
                   />
                 </label>
 
                 <label>
-                  {editingId ? 'Current quantity' : 'Incoming quantity'}
+                  {editingId ? 'Quantity to add' : 'Incoming quantity'}
                   <input
                     className="text-input"
                     type="number"
-                    min="0"
+                    min="1"
                     value={form.quantity}
                     onChange={(e) => setForm({ ...form, quantity: e.target.value })}
                     required

@@ -210,6 +210,7 @@ textarea {
   flex-direction: column;
   gap: 20px;
   min-width: 0;
+  position:relative;
 }
 
 .sidebar-spacious {
@@ -254,7 +255,10 @@ textarea {
 .nav-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-weight: bolder;
+  font-size: small;
 }
 
 .nav-link {
@@ -636,6 +640,9 @@ textarea {
 
 .store-switcher-panel .select-input {
   min-width: 210px;
+}
+.stack-lg admin-settings-page{
+  padding: 12px;
 }
 
 /* ===================== Forms ===================== */
@@ -2992,6 +2999,35 @@ textarea:focus {
   margin-bottom: 6px;
   display: inline-block;
 }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 999;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 760px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  padding: 24px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
 
 /* ===================== Wide Layout Support ===================== */
 @media (min-width: 1100px) {

@@ -275,7 +275,7 @@ export default function AdminBillingsPage() {
     <section className="stack-lg">
       <div className="section-header" style={{ justifyContent: 'space-between', gap: 16 }}>
         <div>
-          <h2>Billings</h2>
+          <h3>Billings</h3>
           <p>
             Accounting and finance view for managers. Track legal billing references, totals,
             payments, balances, and tax-related records.
@@ -311,7 +311,7 @@ export default function AdminBillingsPage() {
                   background: 'none',
                   border: 'none',
                   cursor: 'pointer',
-                  color: '#999',
+                  color: '#29d22c',
                   padding: 0,
                   fontSize: '14px'
                 }}

@@ -335,7 +335,7 @@ export default function AdminUsersPage() {
 
         <div className="section-header split-header">
           <div>
-            <h2>{isAdmin ? 'Users & access' : 'Cashier assignments'}</h2>
+            <h3>{isAdmin ? 'Users & access' : 'Cashier assignments'}</h3>
             <p>
               {isAdmin
                 ? 'Filter by role and assignment to keep the workspace organised.'

@@ -76,7 +76,6 @@ export default function AdminProductsPage() {
   const [products, setProducts] = useState([]);
   const [pagination, setPagination] = useState(emptyPagination);
   const [page, setPage] = useState(1);
-
   const [showModal, setShowModal] = useState(false);
   const [categories, setCategories] = useState([]);
   const [form, setForm] = useState(initialForm);
@@ -299,26 +298,33 @@ export default function AdminProductsPage() {
     }
   };
 
-  const handleEdit = (product) => {
-    setEditingId(product.product_uuid);
-    setForm({
-      category_id: product.category_id || '',
-      sku: product.sku || '',
-      product_name: product.product_name || '',
-      price: product.price || '',
-      cost_price: product.cost_price || '',
-      vat_rate: product.vat_rate || '',
-      apply_vat: Number(product.vat_rate || 0) > 0,
-      is_active: Boolean(product.is_active),
-      image_mode: 'upload',
-      image_file: null,
-      image_url_input: '',
-      image_preview: product.image_url || '',
-      clear_image: false,
-    });
-    setError('');
-    setShowModal(true);
-  };
+const handleEdit = (product) => {
+  const id = product.product_uuid ?? product.uuid ?? product.product_id;
+  
+  if (!id) {
+    console.warn('No valid ID found on product:', product);
+    return;
+  }
+
+  setEditingId(id);
+  setForm({
+    category_id:     product.category_id || '',
+    sku:             product.sku || '',
+    product_name:    product.product_name || '',
+    price:           product.price || '',
+    cost_price:      product.cost_price || '',
+    vat_rate:        product.vat_rate || '',
+    apply_vat:       Number(product.vat_rate || 0) > 0,
+    is_active:       Boolean(product.is_active),
+    image_mode:      'upload',
+    image_file:      null,
+    image_url_input: '',
+    image_preview:   product.image_url || '',
+    clear_image:     false,
+  });
+  setError('');
+  setShowModal(true);
+};
 
   const handleDelete = async (productId) => {
     if (!window.confirm('Delete this product?')) return;
@@ -450,7 +456,6 @@ export default function AdminProductsPage() {
                             </div>
                           )}
                         </td>
-
                         <td>
                           <strong>{product.product_name}</strong>
                           <div className="muted">{product.sku}</div>
@@ -478,7 +483,6 @@ export default function AdminProductsPage() {
 
                         <td>
                           <div className="row-actions compact">
-                            {/* Edit Button */}
                             <button
                               type="button"
                               className="ghost-button"
@@ -487,8 +491,6 @@ export default function AdminProductsPage() {
                             >
                               <Edit size={16} />
                             </button>
-
-                            {/* Delete Button */}
                             <button
                               type="button"
                               className="ghost-button danger"
@@ -640,20 +642,19 @@ export default function AdminProductsPage() {
                   />
                 </label>
 
-                <label>
-                  VAT rate (%)
-                  <input
-                    className="text-input"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={form.vat_rate}
-                    readOnly={editingId} // Prevent VAT changes when editing to avoid complications — can be toggled on/off with apply_vat
-                    disabled={!form.apply_vat}
-                    onChange={(e) => setForm({ ...form, vat_rate: e.target.value })}
-                    placeholder={form.apply_vat ? 'Enter VAT rate' : 'Enable VAT first'}
-                  />
-                </label>
+<label>
+  VAT rate (%)
+  <input
+    className="text-input"
+    type="number"
+    min="0"
+    step="0.01"
+    value={form.vat_rate}
+    disabled={!form.apply_vat}
+    onChange={(e) => setForm({ ...form, vat_rate: e.target.value })}
+    placeholder={form.apply_vat ? 'Enter VAT rate' : 'Enable VAT first'}
+  />
+</label>
 
                 <div className="span-2 image-source-switch">
                   <button
@@ -731,20 +732,20 @@ export default function AdminProductsPage() {
                   </div>
                 ) : null}
 
-                <label className="checkbox-row span-2 catalog-check">
-                  <input
-                    type="checkbox"
-                    checked={form.apply_vat}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        apply_vat: e.target.checked,
-                        vat_rate: e.target.checked ? form.vat_rate || 0 : '',
-                      })
-                    }
-                  />
-                  <span>Apply VAT for this product</span>
-                </label>
+<label className="checkbox-row span-2 catalog-check">
+  <input
+    type="checkbox"
+    checked={form.apply_vat}
+    onChange={(e) =>
+      setForm({
+        ...form,
+        apply_vat: e.target.checked,
+        vat_rate: e.target.checked ? (form.vat_rate || 0) : 0,  // ← 0 not ''
+      })
+    }
+  />
+  <span>Apply VAT for this product</span>
+</label>
 
                 <label className="checkbox-row span-2 catalog-check">
                   <input

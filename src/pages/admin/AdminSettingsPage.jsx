@@ -170,43 +170,6 @@ export default function AdminSettingsPage() {
   return (
     <section className="stack-lg admin-settings-page">
       <div className="dashboard-grid two-wide admin-settings-layout">
-        <aside className="card info-panel admin-settings-sidebar">
-          <div className="card-header">
-            <div>
-              <h3>Control overview</h3>
-              <p>These settings are stored per store and affect printing and POS behavior immediately after save.</p>
-            </div>
-          </div>
-
-          <div className="stack-md">
-            <div className="info-tile admin-info-tile">
-              <strong>Store name</strong>
-              <span>{currentStore?.store_name}</span>
-            </div>
-
-            <div className="info-tile admin-info-tile">
-              <strong>Paper & delay</strong>
-              <span>
-                Control receipt width, print delay and what print content should appear for each store.
-              </span>
-            </div>
-
-            <div className="info-tile admin-info-tile">
-              <strong>Document numbering</strong>
-              <span>
-                Manage invoice and receipt prefixes, suffixes and reset / starting sequence values safely.
-              </span>
-            </div>
-
-            <div className="info-tile admin-info-tile">
-              <strong>Messages</strong>
-              <span>
-                Customize receipt and invoice header / footer text shown to customers during printing.
-              </span>
-            </div>
-          </div>
-        </aside>
-
         <article className="card admin-settings-card">
           <div className="card-header">
             <div>

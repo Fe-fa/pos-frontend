@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Building2, MapPin, Phone, Store as StoreIcon } from 'lucide-react';
+import {
+  Building2,
+  MapPin,
+  Phone,
+  Store as StoreIcon,
+  Edit,
+  Ban,
+} from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { storeService } from '../../services/storeService';
-import { Edit, Ban } from 'lucide-react';
+import StoreModal from '../../components/modals/StoreModal';
 
 const initialForm = {
   store_name: '',
@@ -56,7 +63,7 @@ function SummaryCard({ icon: Icon, label, value, caption }) {
         </div>
       </div>
       <h3>{value}</h3>
-      <span>{caption}</span>
+      {caption ? <span>{caption}</span> : null}
     </article>
   );
 }
@@ -71,6 +78,7 @@ export default function AdminStoresPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   const canManageStores = user?.role === 'admin';
 
@@ -100,7 +108,9 @@ export default function AdminStoresPage() {
   const summary = useMemo(() => {
     const active = stores.filter((store) => store.is_active).length;
     const inactive = stores.length - active;
-    const currencies = new Set(stores.map((store) => store.currency).filter(Boolean)).size;
+    const currencies = new Set(
+      stores.map((store) => store.currency).filter(Boolean)
+    ).size;
 
     return { active, inactive, currencies };
   }, [stores]);
@@ -109,6 +119,12 @@ export default function AdminStoresPage() {
     setForm(initialForm);
     setEditingId(null);
     setError('');
+    setMessage('');
+  };
+
+  const handleOpenCreateModal = () => {
+    resetForm();
+    setIsModalOpen(true);
   };
 
   const handleSubmit = async (event) => {
@@ -127,6 +143,7 @@ export default function AdminStoresPage() {
 
       setForm(initialForm);
       setEditingId(null);
+      setIsModalOpen(false);
       await load();
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to save store.');
@@ -148,6 +165,7 @@ export default function AdminStoresPage() {
     });
     setMessage('');
     setError('');
+    setIsModalOpen(true);
   };
 
   const handleDelete = async (targetStoreId) => {
@@ -187,128 +205,29 @@ export default function AdminStoresPage() {
     <section className="stack-lg">
       <div className="section-header">
         <div>
-          <h2>Stores</h2>
+          <h3>Stores</h3>
         </div>
+
+        <button
+          type="button"
+          className="primary-button"
+          onClick={handleOpenCreateModal}
+        >
+          Create store
+        </button>
       </div>
 
+      {message && !isModalOpen ? <p className="form-success">{message}</p> : null}
+      {error && !isModalOpen ? <p className="form-error">{error}</p> : null}
+
       <div className="metrics-grid">
-        <SummaryCard icon={StoreIcon} label="Stores" value={stores.length}  />
-        <SummaryCard icon={Building2} label="Active" value={summary.active}  />
+        <SummaryCard icon={StoreIcon} label="Stores" value={stores.length} />
+        <SummaryCard icon={Building2} label="Active" value={summary.active} />
         <SummaryCard icon={MapPin} label="Inactive" value={summary.inactive} />
         <SummaryCard icon={Phone} label="Currencies" value={summary.currencies} />
       </div>
 
-      <div className="dashboard-grid two-wide">
-        <article className="card">
-          <div className="card-header">
-            <div>
-              <h3>{editingId ? 'Edit store' : 'Create store'}</h3>
-              <p>System admin access only</p>
-            </div>
-          </div>
-
-          <form className="form-grid two-columns" onSubmit={handleSubmit}>
-            <label>
-              Store name
-              <input
-                className="text-input"
-                value={form.store_name}
-                onChange={(e) => setForm({ ...form, store_name: e.target.value })}
-                required
-              />
-            </label>
-
-            <label>
-              Location
-              <input
-                className="text-input"
-                value={form.location}
-                onChange={(e) => setForm({ ...form, location: e.target.value })}
-                required
-              />
-            </label>
-
-            <label>
-              Currency
-              <input
-                className="text-input"
-                value={form.currency}
-                onChange={(e) => setForm({ ...form, currency: e.target.value })}
-                required
-              />
-            </label>
-
-            <label>
-              Telephone
-              <input
-                className="text-input"
-                value={form.telephone}
-                onChange={(e) => setForm({ ...form, telephone: e.target.value })}
-              />
-            </label>
-
-            <label>
-              PIN / registration
-              <input
-                className="text-input"
-                value={form.pin}
-                onChange={(e) => setForm({ ...form, pin: e.target.value })}
-              />
-            </label>
-
-            <label>
-              Email address
-              <input
-                className="text-input"
-                type="email"
-                value={form.email_address}
-                onChange={(e) => setForm({ ...form, email_address: e.target.value })}
-              />
-            </label>
-
-            <label className="span-2">
-              Physical address
-              <textarea
-                className="text-input"
-                rows="3"
-                value={form.physical_address}
-                onChange={(e) => setForm({ ...form, physical_address: e.target.value })}
-              />
-            </label>
-
-            <label className="span-2">
-              Logo URL
-              <input
-                className="text-input"
-                value={form.logo_url}
-                onChange={(e) => setForm({ ...form, logo_url: e.target.value })}
-                placeholder="https://example.com/logo.png"
-              />
-            </label>
-
-            <label className="checkbox-row span-2">
-              <input
-                type="checkbox"
-                checked={form.is_active}
-                onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
-              />
-              <span>Store is active</span>
-            </label>
-
-            {error ? <p className="form-error span-2">{error}</p> : null}
-            {message ? <p className="form-success span-2">{message}</p> : null}
-
-            <div className="row-actions span-2">
-              <button className="primary-button" type="submit">
-                {editingId ? 'Update store' : 'Create store'}
-              </button>
-              <button type="button" className="ghost-button" onClick={resetForm}>
-                Clear
-              </button>
-            </div>
-          </form>
-        </article>
-
+      <div className="dashboard-grid">
         <article className="card">
           <div className="card-header">
             <div>
@@ -356,27 +275,25 @@ export default function AdminStoresPage() {
                         </span>
                       </td>
                       <td>
-<div className="row-actions compact">
-  {/* Edit Store Button */}
-  <button 
-    type="button"
-    className="ghost-button" 
-    onClick={() => handleEdit(store)}
-    title="Edit"
-  >
-    <Edit size={16} />
-  </button>
+                        <div className="row-actions compact">
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => handleEdit(store)}
+                            title="Edit"
+                          >
+                            <Edit size={16} />
+                          </button>
 
-  {/* Deactivate Store Button */}
-  <button
-    type="button"
-    className="ghost-button danger"
-    onClick={() => handleDelete(store.store_id)}
-    title="Deactivate"
-  >
-    <Ban size={16} />
-  </button>
-</div>
+                          <button
+                            type="button"
+                            className="ghost-button danger"
+                            onClick={() => handleDelete(store.store_id)}
+                            title="Deactivate"
+                          >
+                            <Ban size={16} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -417,6 +334,18 @@ export default function AdminStoresPage() {
           </div>
         </article>
       </div>
+
+      <StoreModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        form={form}
+        setForm={setForm}
+        handleSubmit={handleSubmit}
+        editingId={editingId}
+        error={error}
+        message={message}
+        resetForm={resetForm}
+      />
     </section>
   );
 }
