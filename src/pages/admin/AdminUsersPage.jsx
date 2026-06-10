@@ -1,9 +1,10 @@
-import { X, Plus } from 'lucide-react';
+import { X, Plus, ChevronDown } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { userService } from '../../services/userService';
 import { Edit, Store, UserX } from 'lucide-react';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const initialForm = {
   first_name: '',
@@ -21,12 +22,6 @@ const initialForm = {
   shift_end: '',
 };
 
-const extractList = (response) => {
-  if (Array.isArray(response?.data?.data)) return response.data.data;
-  if (Array.isArray(response?.data)) return response.data;
-  if (Array.isArray(response)) return response;
-  return [];
-};
 
 function normalizeUser(user) {
   return {
@@ -58,6 +53,9 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [meta, setMeta] = useState({ ...EMPTY_META });
+const [page, setPage] = useState(1);
+const [perPage, setPerPage] = useState(null);
   const [roleFilter, setRoleFilter] = useState(
     user?.role === 'admin' ? 'all' : 'cashier'
   );
@@ -94,14 +92,20 @@ export default function AdminUsersPage() {
     setError('');
 
     try {
-      const params = { per_page: 10 };
+      const params = { per_page: perPage ?? 10, page };
 
       if (roleFilter !== 'all') params.role = roleFilter;
       if (assignmentFilter !== 'all') params.assigned = assignmentFilter;
       if (!isAdmin && activeStore?.store_id) params.store_id = activeStore.store_id;
 
       const response = await userService.list(params);
-      setRows(extractList(response).map(normalizeUser));
+      const parsed = extractPaginated(response, perPage ?? 10);
+
+      setRows(parsed.data.map(normalizeUser));
+      setMeta(parsed.meta);
+
+      // Adopt backend's per_page on first load
+      if (perPage === null) setPerPage(parsed.meta.per_page);
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to load users.');
       setRows([]);
@@ -112,7 +116,11 @@ export default function AdminUsersPage() {
 
   useEffect(() => {
     load();
-  }, [roleFilter, assignmentFilter, activeStore?.store_id]);
+  }, [roleFilter, assignmentFilter, activeStore?.store_id, page, perPage]);
+
+  // Reset page to 1 when filters change so you don't land on a missing page
+  const handleRoleFilter = (value) => { setRoleFilter(value); setPage(1); };
+  const handleAssignmentFilter = (value) => { setAssignmentFilter(value); setPage(1); };
 
   const closeFormModal = () => {
     if (submitting) return;
@@ -244,6 +252,7 @@ export default function AdminUsersPage() {
       setMessage(
         editingUser ? 'User updated successfully.' : 'User created successfully.'
       );
+      setPage(1); 
       await load();
     } catch (err) {
       const errors = err?.response?.data?.errors;
@@ -266,6 +275,7 @@ export default function AdminUsersPage() {
       setAssigningUser(null);
       setAssignStoreIds([]);
       setMessage('Store assignment updated successfully.');
+      setPage(1);
       await load();
     } catch (err) {
       setError(
@@ -282,6 +292,7 @@ export default function AdminUsersPage() {
     try {
       await userService.remove(row.user_id);
       setMessage('User updated successfully.');
+      setPage(1);
       await load();
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to update user.');
@@ -347,7 +358,7 @@ export default function AdminUsersPage() {
             <select
               className="select-input slim"
               value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value)}
+              onChange={(e) => handleRoleFilter(e.target.value)}
             >
               <option value="all">All roles</option>
               {isAdmin ? <option value="manager">Managers</option> : null}
@@ -358,12 +369,32 @@ export default function AdminUsersPage() {
             <select
               className="select-input slim"
               value={assignmentFilter}
-              onChange={(e) => setAssignmentFilter(e.target.value)}
+              onChange={(e) => handleAssignmentFilter(e.target.value)} 
             >
               <option value="all">All assignments</option>
               <option value="assigned">Assigned</option>
               <option value="unassigned">Unassigned</option>
             </select>
+
+            
+    {/* Per-page select */}
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+      <ChevronDown
+        size={14}
+        style={{ position: 'absolute', right: 8, pointerEvents: 'none', color: 'var(--color-text-secondary)' }}
+      />
+      <select
+        className="text-input"
+        value={perPage ?? 10}
+        onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+        disabled={loading || perPage === null}
+        style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+      >
+        {[10, 25, 50, 100].map(n => (
+          <option key={n} value={n}>{n}</option>
+        ))}
+      </select>
+    </div>
 
             <button
               type="button"
@@ -437,41 +468,41 @@ export default function AdminUsersPage() {
                       </td>
 
                       <td>
-<div className="row-actions compact">
-  {/* Edit Button */}
-  <button
-    type="button"
-    className="ghost-button"
-    onClick={() => openEditModal(row)}
-    title="Edit"
-  >
-    <Edit size={16} />
-  </button>
+                        <div className="row-actions compact">
+                          {/* Edit Button */}
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => openEditModal(row)}
+                            title="Edit"
+                          >
+                            <Edit size={16} />
+                          </button>
 
-  {/* Assign Stores Button with Icon */}
-  {row.role !== 'admin' ? (
-    <button
-      type="button"
-      className="ghost-button"
-      onClick={() => openAssignModal(row)}
-      title="Assign stores"
-    >
-      <Store size={16} />
-    </button>
-  ) : null}
+                          {/* Assign Stores Button with Icon */}
+                          {row.role !== 'admin' ? (
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => openAssignModal(row)}
+                              title="Assign stores"
+                            >
+                              <Store size={16} />
+                            </button>
+                          ) : null}
 
-  {/* Deactivate Button with Icon */}
-  {row.role !== 'admin' ? (
-    <button
-      type="button"
-      className="ghost-button danger"
-      onClick={() => handleDeactivate(row)}
-      title="Deactivate"
-    >
-      <UserX size={16} />
-    </button>
-  ) : null}
-</div>
+                          {/* Deactivate Button with Icon */}
+                          {row.role !== 'admin' ? (
+                            <button
+                              type="button"
+                              className="ghost-button danger"
+                              onClick={() => handleDeactivate(row)}
+                              title="Deactivate"
+                            >
+                              <UserX size={16} />
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -483,6 +514,40 @@ export default function AdminUsersPage() {
               </tbody>
             </table>
           </div>
+          {/* Pagination bar */}
+<div className="row-actions" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+    <span className="muted">
+      {meta.from && meta.to
+        ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
+        : `${rows.length} users`}
+    </span>
+  </div>
+
+  <div className="row-actions compact">
+    <button
+      type="button"
+      className="ghost-button"
+      onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+      disabled={!meta.has_prev_page || loading}
+    >
+      Previous
+    </button>
+
+    <span className="muted" style={{ padding: '0 8px' }}>
+      {meta.current_page} / {meta.last_page}
+    </span>
+
+    <button
+      type="button"
+      className="ghost-button"
+      onClick={() => setPage((prev) => Math.min(prev + 1, meta.last_page))}
+      disabled={!meta.has_next_page || loading}
+    >
+      Next
+    </button>
+  </div>
+</div>
         </article>
       </section>
 
@@ -678,13 +743,13 @@ export default function AdminUsersPage() {
                           <strong>
                             {form.shift_name || form.shift_start || form.shift_end
                               ? [
-                                  form.shift_name || null,
-                                  form.shift_start && form.shift_end
-                                    ? `(${form.shift_start} - ${form.shift_end})`
-                                    : null,
-                                ]
-                                  .filter(Boolean)
-                                  .join(' ')
+                                form.shift_name || null,
+                                form.shift_start && form.shift_end
+                                  ? `(${form.shift_start} - ${form.shift_end})`
+                                  : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' ')
                               : 'No shift assigned'}
                           </strong>
                         </div>

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { inventoryService } from '../../services/inventoryService';
 import { productService } from '../../services/productService';
 import { useStore } from '../../contexts/StoreContext';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
 
@@ -13,16 +14,6 @@ const initialForm = {
   reorder_level: 0,
 };
 
-const emptyPagination = {
-  data: [],
-  current_page: 1,
-  last_page: 1,
-  per_page: 10,
-  total: 0,
-  from: null,
-  to: null,
-};
-
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
   if (Array.isArray(res?.data)) return res.data;
@@ -30,42 +21,6 @@ const extractList = (res) => {
   return [];
 };
 
-const extractPagination = (response) => {
-  const payload = response?.data ?? response ?? {};
-
-  if (Array.isArray(payload?.data)) {
-    const meta = payload?.meta ?? {};
-    const currentPage = Number(meta.current_page ?? 1);
-    const perPage = Number(meta.per_page ?? payload.data.length ?? 10);
-    const total = Number(meta.total ?? payload.data.length ?? 0);
-    const lastPage =
-      Number(meta.last_page ?? Math.max(1, Math.ceil(total / Math.max(perPage, 1)))) || 1;
-
-    return {
-      data: payload.data,
-      current_page: currentPage,
-      last_page: lastPage,
-      per_page: perPage,
-      total,
-      from: meta.from ?? (total ? (currentPage - 1) * perPage + 1 : null),
-      to: meta.to ?? (total ? Math.min(currentPage * perPage, total) : null),
-    };
-  }
-
-  if (Array.isArray(payload)) {
-    return {
-      data: payload,
-      current_page: 1,
-      last_page: 1,
-      per_page: payload.length,
-      total: payload.length,
-      from: payload.length ? 1 : null,
-      to: payload.length || null,
-    };
-  }
-
-  return emptyPagination;
-};
 
 const useDebouncedValue = (value, delay = 350) => {
   const [debounced, setDebounced] = useState(value);
@@ -109,14 +64,14 @@ export default function AdminInventoryPage() {
   const [historyRows, setHistoryRows] = useState([]);
   const [products, setProducts] = useState([]);
 
-  const [inventoryPagination, setInventoryPagination] = useState(emptyPagination);
-  const [historyPagination, setHistoryPagination] = useState(emptyPagination);
+const [inventoryPagination, setInventoryPagination] = useState({ ...EMPTY_META });
+const [historyPagination, setHistoryPagination]     = useState({ ...EMPTY_META });
 
-  const [inventoryPage, setInventoryPage] = useState(1);
-  const [historyPage, setHistoryPage] = useState(1);
+const [inventoryPage, setInventoryPage] = useState(1);
+const [historyPage, setHistoryPage]     = useState(1);
 
-  const [pageSize, setPageSize] = useState(5);
-  const [historyPageSize, setHistoryPageSize] = useState(10);
+const [pageSize, setPageSize]                       = useState(null);
+const [historyPageSize, setHistoryPageSize]         = useState(null); 
 
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState(null);
@@ -170,100 +125,94 @@ export default function AdminInventoryPage() {
     }
   }, [storeId]);
 
-  const loadInventory = useCallback(
-    async (targetPage = inventoryPage, keyword = debouncedSearch, targetPageSize = pageSize) => {
-      if (!storeId) {
-        setRows([]);
-        setInventoryPagination(emptyPagination);
-        return;
-      }
+const loadInventory = useCallback(
+  async (targetPage = inventoryPage, keyword = debouncedSearch, targetPageSize = pageSize) => {
+    if (!storeId) {
+      setRows([]);
+      setInventoryPagination({ ...EMPTY_META });
+      return;
+    }
 
-      const requestId = ++inventoryRequestRef.current;
-      setLoading(true);
+    const requestId = ++inventoryRequestRef.current;
+    setLoading(true);
 
-      try {
-        const inventoryRes = await inventoryService.list({
-          store_id: storeId,
-          page: targetPage,
-          per_page: targetPageSize,
-          ...(keyword ? { search: keyword } : {}),
-        });
+    try {
+      const inventoryRes = await inventoryService.list({
+        store_id: storeId,
+        page: targetPage,
+        per_page: targetPageSize ?? 5, // safe fallback for first request
+        ...(keyword ? { search: keyword } : {}),
+      });
 
-        if (requestId !== inventoryRequestRef.current) return;
+      if (requestId !== inventoryRequestRef.current) return;
 
-        const parsed = extractPagination(inventoryRes);
-        setRows(parsed.data || []);
-        setInventoryPagination(parsed);
-      } catch (err) {
-        if (requestId !== inventoryRequestRef.current) return;
+      const parsed = extractPaginated(inventoryRes, targetPageSize ?? 5);
+      setRows(parsed.data || []);
+      setInventoryPagination(parsed.meta);
 
-        setRows([]);
-        setInventoryPagination(emptyPagination);
-        setError(err?.response?.data?.message || err?.message || 'Unable to load inventory.');
-      } finally {
-        if (requestId === inventoryRequestRef.current) {
-          setLoading(false);
-        }
-      }
-    },
-    [storeId, inventoryPage, debouncedSearch, pageSize]
-  );
+      // Bootstrap pageSize from backend on first load
+      if (pageSize === null) setPageSize(parsed.meta.per_page);
+    } catch (err) {
+      if (requestId !== inventoryRequestRef.current) return;
+      setRows([]);
+      setInventoryPagination({ ...EMPTY_META });
+      setError(err?.response?.data?.message || err?.message || 'Unable to load inventory.');
+    } finally {
+      if (requestId === inventoryRequestRef.current) setLoading(false);
+    }
+  },
+  [storeId, inventoryPage, debouncedSearch, pageSize]
+);
 
-  const loadHistory = useCallback(
-    async (
-      targetPage = historyPage,
-      keyword = debouncedSearch,
-      targetPageSize = historyPageSize
-    ) => {
-      if (!storeId) {
-        setHistoryRows([]);
-        setHistoryPagination(emptyPagination);
-        return;
-      }
+const loadHistory = useCallback(
+  async (targetPage = historyPage, keyword = debouncedSearch, targetPageSize = historyPageSize) => {
+    if (!storeId) {
+      setHistoryRows([]);
+      setHistoryPagination({ ...EMPTY_META });
+      return;
+    }
 
-      const requestId = ++historyRequestRef.current;
-      setHistoryLoading(true);
+    const requestId = ++historyRequestRef.current;
+    setHistoryLoading(true);
 
-      try {
-        const historyRes = await inventoryService.history({
-          store_id: storeId,
-          page: targetPage,
-          per_page: targetPageSize,
-          ...(keyword ? { search: keyword } : {}),
-        });
+    try {
+      const historyRes = await inventoryService.history({
+        store_id: storeId,
+        page: targetPage,
+        per_page: targetPageSize ?? 10, // safe fallback
+        ...(keyword ? { search: keyword } : {}),
+      });
 
-        if (requestId !== historyRequestRef.current) return;
+      if (requestId !== historyRequestRef.current) return;
 
-        const parsed = extractPagination(historyRes);
-        setHistoryRows(parsed.data || []);
-        setHistoryPagination(parsed);
-      } catch (err) {
-        if (requestId !== historyRequestRef.current) return;
+      const parsed = extractPaginated(historyRes, targetPageSize ?? 10);
+      setHistoryRows(parsed.data || []);
+      setHistoryPagination(parsed.meta);
 
-        setHistoryRows([]);
-        setHistoryPagination(emptyPagination);
-        setError(
-          err?.response?.data?.message || err?.message || 'Unable to load inventory history.'
-        );
-      } finally {
-        if (requestId === historyRequestRef.current) {
-          setHistoryLoading(false);
-        }
-      }
-    },
-    [storeId, historyPage, debouncedSearch, historyPageSize]
-  );
+      // Bootstrap historyPageSize from backend on first load
+      if (historyPageSize === null) setHistoryPageSize(parsed.meta.per_page);
+    } catch (err) {
+      if (requestId !== historyRequestRef.current) return;
+      setHistoryRows([]);
+      setHistoryPagination({ ...EMPTY_META });
+      setError(err?.response?.data?.message || err?.message || 'Unable to load inventory history.');
+    } finally {
+      if (requestId === historyRequestRef.current) setHistoryLoading(false);
+    }
+  },
+  [storeId, historyPage, debouncedSearch, historyPageSize]
+);
 
   useEffect(() => {
     setRows([]);
     setHistoryRows([]);
     setProducts([]);
-    setInventoryPagination(emptyPagination);
-    setHistoryPagination(emptyPagination);
+ setInventoryPagination({ ...EMPTY_META }); // ← was emptyPagination
+  setHistoryPagination({ ...EMPTY_META }); 
     setInventoryPage(1);
     setHistoryPage(1);
-    setPageSize(5);
-    setHistoryPageSize(10);
+    setPageSize(null);
+    setHistoryPageSize(null);
     setSearch('');
     setShowModal(false);
     resetForm();
@@ -437,21 +386,16 @@ export default function AdminInventoryPage() {
 
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="muted">Show</span>
-            <select
-              className="select-input"
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setInventoryPage(1);
-              }}
-              disabled={!storeId}
-            >
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
-              ))}
-            </select>
+<select
+  className="select-input"
+  value={pageSize ?? 5}
+  onChange={(e) => { setPageSize(Number(e.target.value)); setInventoryPage(1); }}
+  disabled={!storeId || pageSize === null}
+>
+  {PAGE_SIZE_OPTIONS.map((size) => (
+    <option key={size} value={size}>{size}</option>
+  ))}
+</select>
           </label>
 
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
@@ -553,36 +497,19 @@ export default function AdminInventoryPage() {
               </span>
 
               <div className="row-actions compact">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setInventoryPage(Math.max(inventoryPagination.current_page - 1, 1))
-                  }
-                  disabled={loading || !inventoryPagination.current_page || inventoryPagination.current_page <= 1}
-                >
-                  Previous
-                </button>
+<button
+  onClick={() => setInventoryPage(Math.max(inventoryPagination.current_page - 1, 1))}
+  disabled={loading || !inventoryPagination.has_prev_page} // ← cleaner
+>
+  Previous
+</button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setInventoryPage(
-                      Math.min(
-                        inventoryPagination.current_page + 1,
-                        inventoryPagination.last_page
-                      )
-                    )
-                  }
-                  disabled={
-                    loading ||
-                    !inventoryPagination.last_page ||
-                    inventoryPagination.current_page >= inventoryPagination.last_page
-                  }
-                >
-                  Next
-                </button>
+<button
+  onClick={() => setInventoryPage(Math.min(inventoryPagination.current_page + 1, inventoryPagination.last_page))}
+  disabled={loading || !inventoryPagination.has_next_page} // ← cleaner
+>
+  Next
+</button>
               </div>
             </div>
           ) : null}
@@ -610,21 +537,16 @@ export default function AdminInventoryPage() {
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span className="muted">Show</span>
-              <select
-                className="select-input"
-                value={historyPageSize}
-                onChange={(e) => {
-                  setHistoryPageSize(Number(e.target.value));
-                  setHistoryPage(1);
-                }}
-                disabled={!storeId}
-              >
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <option key={size} value={size}>
-                    {size}
-                  </option>
-                ))}
-              </select>
+<select
+  className="select-input"
+  value={historyPageSize ?? 10}
+  onChange={(e) => { setHistoryPageSize(Number(e.target.value)); setHistoryPage(1); }}
+  disabled={!storeId || historyPageSize === null}
+>
+  {PAGE_SIZE_OPTIONS.map((size) => (
+    <option key={size} value={size}>{size}</option>
+  ))}
+</select>
             </label>
           </div>
 
@@ -713,37 +635,19 @@ export default function AdminInventoryPage() {
               </span>
 
               <div className="row-actions compact">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setHistoryPage(Math.max(historyPagination.current_page - 1, 1))
-                  }
-                  disabled={
-                    historyLoading ||
-                    !historyPagination.current_page ||
-                    historyPagination.current_page <= 1
-                  }
-                >
-                  Previous
-                </button>
+<button
+  onClick={() => setHistoryPage(Math.max(historyPagination.current_page - 1, 1))}
+  disabled={historyLoading || !historyPagination.has_prev_page}
+>
+  Previous
+</button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() =>
-                    setHistoryPage(
-                      Math.min(historyPagination.current_page + 1, historyPagination.last_page)
-                    )
-                  }
-                  disabled={
-                    historyLoading ||
-                    !historyPagination.last_page ||
-                    historyPagination.current_page >= historyPagination.last_page
-                  }
-                >
-                  Next
-                </button>
+<button
+  onClick={() => setHistoryPage(Math.min(historyPagination.current_page + 1, historyPagination.last_page))}
+  disabled={historyLoading || !historyPagination.has_next_page}
+>
+  Next
+</button>
               </div>
             </div>
           ) : null}

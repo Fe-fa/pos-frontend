@@ -82,26 +82,37 @@ export function openBillingPrint(
   const settings = mergeStoreSettings(storeSettings);
   const payment = billing.payments?.[billing.payments.length - 1];
 
-  const documentNumber =
-    mode === 'invoice'
-      ? billing.invnumber || payment?.receiptnumber || `INV-${billing.billing_id}`
-      : payment?.receiptnumber || billing.invnumber || `RCT-${billing.billing_id}`;
-  const barcodeValue = documentNumber;
-  const qrUrl =
-    resolvePublicDocumentUrl(billing, mode, 'view') ||
-    `${window.location.origin}`;
+const isPaid = Number(billing?.balance_due || 0) <= 0; // ← keep only this one at top
 
-  const footerText =
-    mode === 'invoice'
-      ? settings.invoice_footer || 'Goods once sold are not returnable.'
-      : settings.receipt_footer || 'Thank you for your purchase.';
+const documentNumber =
+  mode === 'invoice'
+    ? billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT')
+    : isPaid
+      ? payment?.receiptnumber || billing.invnumber || (billing.billing_id ? `RCT-${billing.billing_id}` : 'DRAFT')
+      : billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT');
 
-  const headerText =
-    mode === 'invoice'
-      ? settings.invoice_header || ''
-      : settings.receipt_header || '';
+const barcodeValue = documentNumber;
+const qrUrl =
+  resolvePublicDocumentUrl(billing, mode, 'view') ||
+  `${window.location.origin}`;
 
-  const documentTitle = mode === 'invoice' ? 'Tax Invoice' : 'Sales Receipt';
+const footerText =
+  mode === 'invoice'
+    ? settings.invoice_footer || 'Goods once sold are not returnable.'
+    : isPaid
+      ? settings.receipt_footer || 'Thank you for your purchase.'
+      : `Balance due: ${currency(Number(billing?.balance_due || 0), currentStore?.currency || 'KES')}. Please settle your outstanding balance.`;
+
+const headerText =
+  mode === 'invoice'
+    ? settings.invoice_header || ''
+    : settings.receipt_header || '';
+
+const documentTitle = mode === 'invoice'
+  ? 'Tax Invoice'
+  : isPaid
+    ? 'Sales Receipt'
+    : 'Payment Receipt';
 
   const vatRows = groupVatSummary(billing.items || []);
   const netAmount = Number(billing.subtotal || 0);
@@ -417,9 +428,9 @@ export function openBillingPrint(
 
       <div class="meta-row">
         <div class="label">Date</div>
-        <div class="value">${escapeHtml(
-          formatDateTime(payment?.payment_date || billing.billing_date)
-        )}</div>
+    <div class="value">${escapeHtml(
+  formatDateTime(payment?.payment_date || billing.billing_date || new Date().toISOString())
+)}</div>
       </div>
 
       ${

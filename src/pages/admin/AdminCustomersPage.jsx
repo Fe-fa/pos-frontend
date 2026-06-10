@@ -1,4 +1,4 @@
-import { X, Edit, Trash2 } from 'lucide-react';
+import { X, Edit, Trash2, ChevronDown } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { customerService } from '../../services/customerService';
 import { currency } from '../../utils/helpers';
@@ -6,34 +6,35 @@ import { useStore } from '../../contexts/StoreContext';
 
 const initialForm = { full_name: '', email: '', phone: '', current_balance: 0 };
 
+const DEFAULT_PER_PAGE = 10;
+
 const emptyPagination = {
   data: [],
   current_page: 1,
-  per_page: 10,
-  prev_page_url: null,
-  next_page_url: null,
+  last_page: 1,
+  per_page: DEFAULT_PER_PAGE,
   from: null,
   to: null,
+  total: 0,
 };
 
 const extractPagination = (response) => {
   const payload = response?.data ?? response ?? {};
+  const meta   = payload?.meta ?? {};
+  const data   = Array.isArray(payload?.data) ? payload.data
+               : Array.isArray(payload)        ? payload
+               : [];
 
-  if (Array.isArray(payload?.data)) {
-    return { ...emptyPagination, ...payload, data: payload.data };
-  }
-
-  if (Array.isArray(payload)) {
-    return {
-      ...emptyPagination,
-      data: payload,
-      per_page: payload.length,
-      from: payload.length ? 1 : null,
-      to: payload.length || null,
-    };
-  }
-
-  return emptyPagination;
+  return {
+    ...emptyPagination,
+    data,
+    current_page: Number(meta.current_page ?? 1),
+    last_page:    Number(meta.last_page    ?? 1),
+    per_page:     Number(meta.per_page     ?? DEFAULT_PER_PAGE),
+    total:        Number(meta.total        ?? data.length),
+    from:         meta.from ?? (data.length ? 1 : null),
+    to:           meta.to   ?? (data.length || null),
+  };
 };
 
 export default function AdminCustomersPage() {
@@ -50,6 +51,7 @@ export default function AdminCustomersPage() {
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [perPage, setPerPage] = useState(DEFAULT_PER_PAGE);
 
   const loadCustomers = async () => {
     if (!storeId) {
@@ -67,7 +69,7 @@ export default function AdminCustomersPage() {
         page,
         store_id: storeId,
         search,
-        per_page: 10,
+        per_page: perPage,
       });
 
       const parsed = extractPagination(response);
@@ -97,9 +99,9 @@ export default function AdminCustomersPage() {
     }
   }, [storeId]);
 
-  useEffect(() => {
-    loadCustomers();
-  }, [storeId, search, page]);
+ useEffect(() => {
+  loadCustomers();
+}, [storeId, search, page, perPage]);
 
   const resetForm = () => {
     setForm(initialForm);
@@ -213,6 +215,28 @@ export default function AdminCustomersPage() {
               disabled={!storeId}
             />
           </label>
+<div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+  <ChevronDown
+    size={14}
+    style={{
+      position: 'absolute',
+      right: 8,
+      pointerEvents: 'none',
+      color: 'var(--color-text-secondary)',
+    }}
+  />
+  <select
+    className="text-input"
+    value={perPage}
+    onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+    disabled={!storeId}
+    style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+  >
+    {[5, 10, 25, 50].map(n => (
+      <option key={n} value={n}>{n}</option>
+    ))}
+  </select>
+</div>
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
 
@@ -289,23 +313,23 @@ export default function AdminCustomersPage() {
               <span className="muted">Page {pagination.current_page || page}</span>
 
               <div className="row-actions compact">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
-                  disabled={!pagination.prev_page_url || loading}
-                >
-                  Previous
-                </button>
+<button
+  type="button"
+  className="ghost-button"
+  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+  disabled={pagination.current_page <= 1 || loading}   
+>
+  Previous
+</button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setPage((prev) => prev + 1)}
-                  disabled={!pagination.next_page_url || loading}
-                >
-                  Next
-                </button>
+<button
+  type="button"
+  className="ghost-button"
+  onClick={() => setPage((prev) => prev + 1)}
+  disabled={pagination.current_page >= pagination.last_page || loading} 
+>
+  Next
+</button>
               </div>
             </div>
           ) : null}

@@ -1,4 +1,4 @@
-import { X, Edit, Trash2 } from 'lucide-react';
+import { X, Edit, Trash2, ChevronDown } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { categoryService } from '../../services/categoryService';
 import { useStore } from '../../contexts/StoreContext';
@@ -24,6 +24,7 @@ export default function AdminCategoriesPage() {
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [perPage, setPerPage] = useState(3);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -46,13 +47,13 @@ export default function AdminCategoriesPage() {
 
     try {
       const response = await categoryService.list({
-        store_id: Number(storeId),
-        search: debouncedSearch || undefined,
-        page,
-        per_page: 10,
+  store_id: Number(storeId),
+  search: debouncedSearch || undefined,
+  page,
+  per_page: perPage, // ← was: 10, now dynamic based on user selection
       });
 
-      const parsed = extractPaginated(response, 10);
+      const parsed = extractPaginated(response, perPage);
       setCategories(parsed.data);
       setMeta(parsed.meta);
     } catch (err) {
@@ -79,7 +80,7 @@ export default function AdminCategoriesPage() {
 
   useEffect(() => {
     loadCategories();
-  }, [storeId, debouncedSearch, page]);
+  }, [storeId, debouncedSearch, page, perPage]);
 
   const resetForm = () => {
     setForm(initialForm);
@@ -164,7 +165,7 @@ export default function AdminCategoriesPage() {
           <div className="catalog-hero-copy">
             <h3 className="catalog-title">Categories</h3>
             <p className="catalog-subtitle">
-              Showing {meta.from}-{meta.to} of {meta.total}
+              Showing {meta.from}-{meta.to} of {meta.total} 
             </p>
           </div>
 
@@ -192,6 +193,28 @@ export default function AdminCategoriesPage() {
               disabled={!storeId}
             />
           </label>
+            <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+    <ChevronDown
+      size={14}
+      style={{
+        position: 'absolute',
+        right: 8,
+        pointerEvents: 'none',
+        color: 'var(--color-text-secondary)',
+      }}
+    />
+    <select
+      className="text-input"
+      value={perPage}
+      onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+      disabled={!storeId}
+      style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+    >
+      {[3, 5, 10, 25, 50].map(n => (
+        <option key={n} value={n}>{n}</option>
+      ))}
+    </select>
+  </div>
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
 

@@ -1,55 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 import Modal from '../../components/common/Modal';
 import { useStore } from '../../contexts/StoreContext';
 import { billingService } from '../../services/billingService';
 import { formatDateTime } from '../../utils/helpers';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
-const emptyPagination = {
-  data: [],
-  current_page: 1,
-  last_page: 1,
-  per_page: 10,
-  total: 0,
-  from: null,
-  to: null,
-};
-
-const extractPagination = (response) => {
-  const payload = response?.data ?? response ?? {};
-
-  if (Array.isArray(payload?.data)) {
-    const meta = payload?.meta ?? {};
-    const currentPage = Number(meta.current_page ?? 1);
-    const perPage = Number(meta.per_page ?? payload.data.length ?? 10);
-    const total = Number(meta.total ?? payload.data.length ?? 0);
-    const lastPage =
-      Number(meta.last_page ?? Math.max(1, Math.ceil(total / Math.max(perPage, 1)))) || 1;
-
-    return {
-      data: payload.data,
-      current_page: currentPage,
-      last_page: lastPage,
-      per_page: perPage,
-      total,
-      from: total ? (currentPage - 1) * perPage + 1 : null,
-      to: total ? Math.min(currentPage * perPage, total) : null,
-    };
-  }
-
-  if (Array.isArray(payload)) {
-    return {
-      data: payload,
-      current_page: 1,
-      last_page: 1,
-      per_page: payload.length,
-      total: payload.length,
-      from: payload.length ? 1 : null,
-      to: payload.length || null,
-    };
-  }
-
-  return emptyPagination;
-};
 
 const extractRecord = (response) => {
   return response?.data?.data || response?.data || response || null;
@@ -118,8 +74,10 @@ export default function AdminOrdersPage() {
   const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
 
   const [orders, setOrders] = useState([]);
-  const [pagination, setPagination] = useState(emptyPagination);
+  const [meta, setMeta] = useState({ ...EMPTY_META });
   const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [fulfillmentStatus, setFulfillmentStatus] = useState('');
   const [fulfillmentType, setFulfillmentType] = useState('');
@@ -134,7 +92,7 @@ export default function AdminOrdersPage() {
     async (targetPage = page) => {
       if (!storeId) {
         setOrders([]);
-        setPagination(emptyPagination);
+        setMeta({ ...EMPTY_META });
         setLoading(false);
         return;
       }
@@ -146,38 +104,31 @@ export default function AdminOrdersPage() {
       try {
         const params = {
           page: targetPage,
-          per_page: 10,
+          per_page: perPage ?? 10, // ← safe fallback
           store_id: storeId,
         };
 
-        if (fulfillmentStatus) {
-          params.fulfillment_status = fulfillmentStatus;
-        }
-
-        if (fulfillmentType) {
-          params.fulfillment_type = fulfillmentType;
-        }
+        if (fulfillmentStatus) params.fulfillment_status = fulfillmentStatus;
+        if (fulfillmentType) params.fulfillment_type = fulfillmentType;
 
         const response = await billingService.list(params);
-
         if (requestId !== requestRef.current) return;
 
-        const parsed = extractPagination(response);
-        setPagination(parsed);
+        const parsed = extractPaginated(response, perPage ?? 10); // ← shared util
+        setMeta(parsed.meta);
         setOrders(parsed.data || []);
+
+        if (perPage === null) setPerPage(parsed.meta.per_page); // ← bootstrap
       } catch (err) {
         if (requestId !== requestRef.current) return;
-
         setError(err?.response?.data?.message || 'Unable to load orders.');
         setOrders([]);
-        setPagination(emptyPagination);
+        setMeta({ ...EMPTY_META });
       } finally {
-        if (requestId === requestRef.current) {
-          setLoading(false);
-        }
+        if (requestId === requestRef.current) setLoading(false);
       }
     },
-    [page, fulfillmentStatus, fulfillmentType, storeId]
+    [page, fulfillmentStatus, fulfillmentType, storeId, perPage] // ← add perPage
   );
 
   useEffect(() => {
@@ -187,13 +138,13 @@ export default function AdminOrdersPage() {
 
     if (!storeId) {
       setOrders([]);
-      setPagination(emptyPagination);
+      setMeta({ ...EMPTY_META });
       setLoading(false);
       return;
     }
 
     loadOrders(page);
-  }, [storeId, page, fulfillmentStatus, fulfillmentType, loadOrders]);
+  }, [storeId, page, perPage, fulfillmentStatus, fulfillmentType, loadOrders]);
 
   useEffect(() => {
     if (!success) return;
@@ -204,6 +155,19 @@ export default function AdminOrdersPage() {
 
     return () => clearTimeout(timer);
   }, [success]);
+
+  // Store reset
+  useEffect(() => {
+    setOrders([]);
+    setMeta({ ...EMPTY_META });
+    setPage(1);
+    setPerPage(null);
+    setFulfillmentStatus('');
+    setFulfillmentType('');
+    setSelectedOrder(null);
+    setError('');
+    setSuccess('');
+  }, [storeId]);
 
   const openDetails = async (billingId) => {
     setError('');
@@ -295,6 +259,26 @@ export default function AdminOrdersPage() {
               </option>
             ))}
           </select>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="muted">Show</span>
+            <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+              <ChevronDown
+                size={14}
+                style={{ position: 'absolute', right: 8, pointerEvents: 'none', color: 'var(--color-text-secondary)' }}
+              />
+              <select
+                className="select-input slim"
+                value={perPage ?? 10}
+                onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+                disabled={!storeId}
+                style={{ paddingRight: 28, appearance: 'none' }}
+              >
+                {[5, 10, 20, 50, 100].map(n => (
+                  <option key={n} value={n}>{n} per page</option>
+                ))}
+              </select>
+            </div>
+          </label>
 
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
@@ -305,8 +289,8 @@ export default function AdminOrdersPage() {
           <div>
             <h3>Order records</h3>
             <p>
-              {pagination.from && pagination.to
-                ? `Showing ${pagination.from}-${pagination.to} of ${pagination.total}`
+              {meta.from && meta.to
+                ? `Showing ${meta.from}-${meta.to} of ${meta.total}`
                 : `${orders.length} items`}
               {loading && orders.length ? ' • refreshing...' : ''}
             </p>
@@ -376,24 +360,20 @@ export default function AdminOrdersPage() {
             style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
           >
             <span className="muted">
-              Page {pagination.current_page} of {pagination.last_page}
+              Page {meta.current_page} of {meta.last_page}
             </span>
 
             <div className="row-actions compact">
               <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setPage(Math.max(pagination.current_page - 1, 1))}
-                disabled={loading || pagination.current_page <= 1}
+                onClick={() => setPage(Math.max(meta.current_page - 1, 1))}
+                disabled={loading || !meta.has_prev_page}
               >
                 Previous
               </button>
 
               <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setPage(Math.min(pagination.current_page + 1, pagination.last_page))}
-                disabled={loading || pagination.current_page >= pagination.last_page}
+                onClick={() => setPage(Math.min(meta.current_page + 1, meta.last_page))}
+                disabled={loading || !meta.has_next_page}
               >
                 Next
               </button>

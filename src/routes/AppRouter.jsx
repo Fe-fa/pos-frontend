@@ -22,6 +22,7 @@ import CashierPosPage from '../pages/cashier/CashierPosPage';
 import { getUserHomePath } from '../utils/helpers';
 import AdminAccessControlPage from '../pages/admin/AdminAccessControlPage';
 import AdminCashiersPage from '../pages/admin/AdminCashiersPage';
+import ManagerDashboardPage from '../pages/admin/ManagerDashboardPage';
 
 
 function RootRedirect() {
@@ -46,6 +47,7 @@ export default function AppRouter() {
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Navigate to="dashboard" replace />} />
           <Route path="dashboard" element={<AdminDashboardPage />} />
+          <Route path="manager" element={<ManagerDashboardPage />} />
           <Route path="categories" element={<AdminCategoriesPage />} />
           <Route path="customers" element={<AdminCustomersPage />} />
           <Route path="products" element={<AdminProductsPage />} />

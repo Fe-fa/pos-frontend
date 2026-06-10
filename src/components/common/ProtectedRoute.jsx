@@ -19,11 +19,17 @@ export default function ProtectedRoute({ allowedRoles = [], requireStoreAssignme
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  if (user?.role === 'cashier' && !userHasStoreAssignment(user) && location.pathname !== '/pending-approval') {
+  // Cashiers only — never block admin/manager for missing store
+  if (
+    user?.role === 'cashier' &&
+    !userHasStoreAssignment(user) &&
+    location.pathname !== '/pending-approval'
+  ) {
     return <Navigate to="/pending-approval" replace />;
   }
 
-  if (requireStoreAssignment && !userHasStoreAssignment(user)) {
+  // Admin bypasses store assignment gate entirely
+  if (requireStoreAssignment && user?.role !== 'admin' && !userHasStoreAssignment(user)) {
     return <Navigate to="/pending-approval" replace />;
   }
 

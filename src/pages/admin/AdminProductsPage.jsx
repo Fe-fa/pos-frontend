@@ -1,9 +1,10 @@
-import { Plus, X, Edit, Trash2 } from 'lucide-react';
+import { Plus, X, Edit, Trash2, ChevronDown  } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { categoryService } from '../../services/categoryService';
 import { productService } from '../../services/productService';
 import { currency } from '../../utils/helpers';
 import { useStore } from '../../contexts/StoreContext';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const IMAGE_BASE_URL =
   import.meta.env.VITE_STORAGE_URL ||
@@ -24,36 +25,6 @@ const initialForm = {
   image_preview: '',
   clear_image: false,
 };
-const emptyPagination = {
-  data: [],
-  current_page: 1,
-  per_page: 10,
-  prev_page_url: null,
-  next_page_url: null,
-  from: null,
-  to: null,
-};
-const extractPagination = (response) => {
-  const payload = response?.data ?? response ?? {};
-
-  if (Array.isArray(payload?.data)) {
-    return { ...emptyPagination, ...payload, data: payload.data };
-  }
-
-  if (Array.isArray(payload)) {
-    return {
-      ...emptyPagination,
-      data: payload,
-      per_page: payload.length,
-      from: payload.length ? 1 : null,
-      to: payload.length || null,
-    };
-  }
-
-  return emptyPagination;
-};
-
-// Categories are small and rarely paginated — keep simple list extraction
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
   if (Array.isArray(res?.data)) return res.data;
@@ -74,7 +45,8 @@ export default function AdminProductsPage() {
   );
 
   const [products, setProducts] = useState([]);
-  const [pagination, setPagination] = useState(emptyPagination);
+  const [meta, setMeta] = useState({ ...EMPTY_META });
+const [perPage, setPerPage] = useState(12);
   const [page, setPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
   const [categories, setCategories] = useState([]);
@@ -95,7 +67,7 @@ export default function AdminProductsPage() {
     if (!storeId) {
       setProducts([]);
       setCategories([]);
-      setPagination(emptyPagination);
+      setMeta({ ...EMPTY_META });
       setLoading(false);
       return;
     }
@@ -104,11 +76,10 @@ export default function AdminProductsPage() {
     setError('');
 
     try {
-      // Build params — omit search when empty to avoid sending search=
       const productParams = {
         page,
         store_id: storeId,
-        per_page: 10,
+        per_page: perPage,
         ...(search.trim() ? { search: search.trim() } : {}),
       };
 
@@ -117,14 +88,14 @@ export default function AdminProductsPage() {
         categoryService.list({ store_id: storeId, per_page: 100 }),
       ]);
 
-      const parsed = extractPagination(productsRes);
+      const parsed = extractPaginated(productsRes, perPage);
       setProducts(parsed.data || []);
-      setPagination(parsed);
+      setMeta(parsed.meta || { ...EMPTY_META });
       setCategories(extractList(categoriesRes));
     } catch (err) {
       setError(formatApiError(err) || 'Unable to load products.');
       setProducts([]);
-      setPagination(emptyPagination);
+      setMeta({ ...EMPTY_META });
       setCategories([]);
     } finally {
       setLoading(false);
@@ -134,7 +105,7 @@ export default function AdminProductsPage() {
   // Reset everything when store changes
   useEffect(() => {
     setProducts([]);
-    setPagination(emptyPagination);
+    setMeta({ ...EMPTY_META });
     setCategories([]);
     setSearch('');
     setShowModal(false);
@@ -151,7 +122,7 @@ export default function AdminProductsPage() {
   // Reload when store, search, or page changes
   useEffect(() => {
     load();
-  }, [storeId, search, page]);
+  }, [storeId, search, page, perPage]);
 
   // Revoke blob URL on unmount / preview change
   useEffect(() => {
@@ -363,9 +334,9 @@ const handleEdit = (product) => {
           <div className="catalog-hero-copy" style={{ display: 'flex', flexDirection: 'column' }}>
             <h2 className="catalog-title">Products</h2>
             <p className="catalog-subtitle">
-              {pagination.from && pagination.to
-                ? `Showing ${pagination.from}–${pagination.to}`
-                : `${products.length} products in catalog`}
+{meta.from && meta.to
+  ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
+  : `${products.length} products in catalog`}
             </p>
           </div>
 
@@ -394,6 +365,23 @@ const handleEdit = (product) => {
               disabled={!storeId}
             />
           </label>
+<div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+  <ChevronDown
+    size={14}
+    style={{ position: 'absolute', right: 8, pointerEvents: 'none', color: 'var(--color-text-secondary)' }}
+  />
+  <select
+    className="text-input"
+    value={perPage}
+    onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+    disabled={!storeId}
+    style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+  >
+    {[12, 24, 48, 100].map(n => (
+      <option key={n} value={n}>{n}</option>
+    ))}
+  </select>
+</div>
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
 
@@ -519,26 +507,26 @@ const handleEdit = (product) => {
               className="row-actions"
               style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
             >
-              <span className="muted">Page {pagination.current_page || page}</span>
+              <span className="muted">Page {meta.current_page} of {meta.last_page}</span>
 
               <div className="row-actions compact">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
-                  disabled={!pagination.prev_page_url || loading}
-                >
-                  Previous
-                </button>
+<button
+  type="button"
+  className="ghost-button"
+  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+  disabled={!meta.has_prev_page || loading} 
+>
+  Previous
+</button>
 
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setPage((prev) => prev + 1)}
-                  disabled={!pagination.next_page_url || loading}
-                >
-                  Next
-                </button>
+<button
+  type="button"
+  className="ghost-button"
+  onClick={() => setPage((prev) => Math.min(prev + 1, meta.last_page))}
+  disabled={!meta.has_next_page || loading} 
+>
+  Next
+</button>
               </div>
             </div>
           ) : null}

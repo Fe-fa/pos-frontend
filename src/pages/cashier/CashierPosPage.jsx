@@ -1,18 +1,14 @@
 import {
   ChevronLeft,
   ChevronRight,
-  CreditCard,
   FolderClock,
   Minus,
   Plus,
   Printer,
   Search,
   ShoppingCart,
-  Smartphone,
   Trash2,
-  Wallet,
   Download,
-  X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
@@ -24,6 +20,10 @@ import { productService } from '../../services/productService';
 import { currency, formatDateTime } from '../../utils/helpers';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { mergeStoreSettings } from '../../utils/storeSettings';
+import PaymentModal from '../../components/modals/PaymentModal';
+import DraftModal from '../../components/modals/DraftModal';
+import CustomerModal from '../../components/modals/CustomerModal';
+import ProductCard from '../../components/card/ProductCard';
 
 const SEARCH_DEBOUNCE_MS = 300;
 const PRODUCT_CACHE_TTL_MS = 60_000;
@@ -33,12 +33,6 @@ const DEFAULT_VAT_RATE = 16;
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
 
-const PAYMENT_METHODS = [
-  { key: 'cash', title: 'CASH', description: 'Receive cash and enter tendered amount', icon: Wallet },
-  { key: 'mpesa', title: 'MPESA', description: 'Enter phone number and transaction code', icon: Smartphone },
-  { key: 'card', title: 'CARD', description: 'Enter card reference', icon: CreditCard },
-];
-
 /* ----------------------- helpers ----------------------- */
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
@@ -46,7 +40,6 @@ const extractList = (res) => {
   if (Array.isArray(res)) return res;
   return [];
 };
-
 
 const extractMeta = (res) => res?.meta || res?.data?.meta || {};
 
@@ -77,9 +70,9 @@ const getProductImage = (product) => {
 const getItemTotal = (item) =>
   Number(
     item?.total_amount ??
-      item?.line_total ??
-      item?.line_subtotal ??
-      Number(item?.quantity || 0) * Number(item?.unit_price || 0)
+    item?.line_total ??
+    item?.line_subtotal ??
+    Number(item?.quantity || 0) * Number(item?.unit_price || 0)
   );
 
 const isTypingElement = (target) => {
@@ -143,7 +136,9 @@ const recalcBillingTotals = (billing) => {
   const vat_amount = items.reduce((s, it) => s + Number(it.vat_amount || 0), 0);
   const total = +(subtotal + vat_amount).toFixed(2);
   const grossTotal = items.reduce((s, it) => s + Number(it.total_amount || 0), 0);
-  const blendedRate = subtotal > 0 ? +((vat_amount / subtotal) * 100).toFixed(2) : DEFAULT_VAT_RATE;
+  const blendedRate =
+    subtotal > 0 ? +((vat_amount / subtotal) * 100).toFixed(2) : DEFAULT_VAT_RATE;
+
   return {
     ...billing,
     items,
@@ -158,8 +153,11 @@ const buildLocalItem = (product, quantity = 1) => {
   const unitPrice = Number(product.price || 0);
   const vatRate = Number(product.vat_rate ?? DEFAULT_VAT_RATE);
   const totals = calcLineFromGross(quantity, unitPrice, vatRate);
+
   return {
-    billing_item_id: `local-${product.product_id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    billing_item_id: `local-${product.product_id}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`,
     product_id: product.product_id,
     product: {
       product_id: product.product_id,
@@ -209,7 +207,7 @@ const safeLoadCart = (key) => {
 
 const safeSaveCart = (key, payload) => {
   try {
-    if (!payload || !payload.items?.length) {
+    if (!payload || !payload.billing?.items?.length) {
       window.localStorage.removeItem(key);
       return;
     }
@@ -236,7 +234,7 @@ export default function CashierPosPage() {
 
   /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
-  
+
   const bootstrapProductsFetchedRef = useRef(false);
 
   const categoryCacheRef = useRef(new Map());
@@ -255,7 +253,6 @@ export default function CashierPosPage() {
   const cartStorageKeyRef = useRef('');
   const hydratedFromStorageRef = useRef(false);
 
-  // ✅ FIX #1: Always-current filter ref — read synchronously in callbacks
   const productFiltersRef = useRef({
     storeId: '',
     activeCategoryId: null,
@@ -263,8 +260,6 @@ export default function CashierPosPage() {
     search: '',
   });
 
-  // ✅ FIX #2: Bootstrap callback refs assigned DURING RENDER (not in effects)
-  // This eliminates the 1-render lag that caused double bootstrap fires.
   const loadStaticDataRef = useRef(null);
   const loadDraftsRef = useRef(null);
   const loadBillingDetailRef = useRef(null);
@@ -274,7 +269,6 @@ export default function CashierPosPage() {
   const [categoryPageInfo, setCategoryPageInfo] = useState(emptyPageInfo());
 
   const [products, setProducts] = useState([]);
-  const [customers, setCustomers] = useState([]);
   const [drafts, setDrafts] = useState([]);
 
   const [activeCategory, setActiveCategory] = useState('all');
@@ -286,6 +280,7 @@ export default function CashierPosPage() {
   const [productPageInfo, setProductPageInfo] = useState(emptyPageInfo());
 
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [notes, setNotes] = useState('');
   const [billing, setBilling] = useState(null);
 
@@ -299,6 +294,7 @@ export default function CashierPosPage() {
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
+  const [showCustomerModal, setShowCustomerModal] = useState(false);
 
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
@@ -307,7 +303,6 @@ export default function CashierPosPage() {
   const [billingLoading, setBillingLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  // ✅ FIX #3: catalogReady gates prefetch — prevents it racing bootstrap
   const [catalogReady, setCatalogReady] = useState(false);
 
   const [error, setError] = useState('');
@@ -339,9 +334,14 @@ export default function CashierPosPage() {
   const canPrevCategory = categoryPageInfo.hasPrevPage;
   const canNextCategory = categoryPageInfo.hasNextPage;
 
-  // Sync refs every render — no useEffect lag
-  useEffect(() => { billingRef.current = billing; }, [billing]);
-  useEffect(() => { cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id); }, [storeId, user?.user_id]);
+  useEffect(() => {
+    billingRef.current = billing;
+  }, [billing]);
+
+  useEffect(() => {
+    cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id);
+  }, [storeId, user?.user_id]);
+
   useEffect(() => {
     productFiltersRef.current = {
       storeId: String(storeId || ''),
@@ -351,7 +351,6 @@ export default function CashierPosPage() {
     };
   }, [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]);
 
-  // localStorage cart persistence
   useEffect(() => {
     const key = cartStorageKeyRef.current;
     if (!key || !hydratedFromStorageRef.current) return;
@@ -381,12 +380,12 @@ export default function CashierPosPage() {
           product_id: it.product_id,
           product: it.product
             ? {
-                product_id: it.product.product_id,
-                product_name: it.product.product_name,
-                sku: it.product.sku,
-                price: it.product.price,
-                vat_rate: it.product.vat_rate,
-              }
+              product_id: it.product.product_id,
+              product_name: it.product.product_name,
+              sku: it.product.sku,
+              price: it.product.price,
+              vat_rate: it.product.vat_rate,
+            }
             : null,
           quantity: it.quantity,
           unit_price: it.unit_price,
@@ -409,7 +408,7 @@ export default function CashierPosPage() {
      ===================================================================== */
   const enqueueSync = useCallback((task) => {
     const next = syncQueueRef.current.then(task, task);
-    syncQueueRef.current = next.catch(() => {});
+    syncQueueRef.current = next.catch(() => { });
     return next;
   }, []);
 
@@ -446,9 +445,11 @@ export default function CashierPosPage() {
   const resetSale = useCallback(() => {
     setBilling(null);
     setSelectedCustomerId('');
+    setSelectedCustomer(null);
     setNotes('');
     resetPaymentState('');
     setShowPaymentModal(false);
+    setShowCustomerModal(false);
     safeClearCart(cartStorageKeyRef.current);
   }, [resetPaymentState]);
 
@@ -563,33 +564,26 @@ export default function CashierPosPage() {
 
   const loadStaticData = useCallback(async () => {
     if (!storeId) {
-      return { categories: [], categoryPageInfo: emptyPageInfo(), customers: [] };
+      return { categories: [], categoryPageInfo: emptyPageInfo() };
     }
 
     setCatalogLoading(true);
     setError('');
 
     try {
-      const [categoryResult, customersRes] = await Promise.all([
-        loadCategoriesPage(1, { force: true, silent: true }),
-        customerService.list({ store_id: Number(storeId), per_page: 30 }),
-      ]);
-
-      const customerList = extractList(customersRes);
-      setCustomers(customerList);
+      const categoryResult = await loadCategoriesPage(1, { force: true, silent: true });
 
       return {
         categories: categoryResult.items,
         categoryPageInfo: categoryResult.pageInfo,
-        customers: customerList,
       };
     } catch (err) {
       console.error('POS catalog load failed:', err);
       setError(
-        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'}`
+        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'
+        }`
       );
-      setCustomers([]);
-      return { categories: [], categoryPageInfo: emptyPageInfo(), customers: [] };
+      return { categories: [], categoryPageInfo: emptyPageInfo() };
     } finally {
       setCatalogLoading(false);
     }
@@ -598,13 +592,12 @@ export default function CashierPosPage() {
   /* =====================================================================
      PRODUCTS
      ===================================================================== */
-  // ✅ Stable forever — reads from ref, no deps
   const buildCacheKey = useCallback(
     (
       page,
       categoryId = productFiltersRef.current.activeCategoryId,
       scopeKey = productFiltersRef.current.scopeKey,
-      searchValue = productFiltersRef.current.search,
+      searchValue = productFiltersRef.current.search
     ) =>
       JSON.stringify({
         storeId: productFiltersRef.current.storeId,
@@ -616,7 +609,6 @@ export default function CashierPosPage() {
     []
   );
 
-  // ✅ Stable — reads from ref, no deps
   const fetchProductsPage = useCallback(
     async (page, categoryId = productFiltersRef.current.activeCategoryId) => {
       const { storeId: sid, search } = productFiltersRef.current;
@@ -638,7 +630,7 @@ export default function CashierPosPage() {
       const pageInfo = buildPageInfo(meta, items, page);
       return { items, pageInfo };
     },
-    [] // ✅ stable forever
+    []
   );
 
   const loadProducts = useCallback(
@@ -652,7 +644,7 @@ export default function CashierPosPage() {
       if (!force && cached) {
         setProducts(cached.items);
         setProductPageInfo(cached.pageInfo);
-        if (fresh) return; // ✅ serve from cache instantly, no setCurrentPage thrash
+        if (fresh) return;
       }
 
       setProductsLoading(true);
@@ -756,15 +748,53 @@ export default function CashierPosPage() {
     [mergeDraftPreview]
   );
 
-  // ✅ FIX #2: Assign refs synchronously during render — NOT in useEffect.
-  // This guarantees bootstrap always calls the latest version of each function
-  // and eliminates the stale-closure double-fire seen in the logs.
   loadStaticDataRef.current = loadStaticData;
   loadDraftsRef.current = loadDrafts;
   loadBillingDetailRef.current = loadBillingDetail;
 
   /* =====================================================================
-     EFFECTS — search debouncer, success timeout, category visibility
+     SELECTED CUSTOMER DETAIL LOAD (lazy)
+     ===================================================================== */
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!selectedCustomerId) {
+      setSelectedCustomer(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // If we already have the matching customer, no need to refetch.
+    if (
+      selectedCustomer &&
+      String(getCustomerId(selectedCustomer)) === String(selectedCustomerId)
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      try {
+        const response = await customerService.show(selectedCustomerId);
+        if (cancelled) return;
+        const detail = response?.data || response;
+        setSelectedCustomer(detail || null);
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to load selected customer:', err);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCustomerId, selectedCustomer]);
+
+  /* =====================================================================
+     EFFECTS
      ===================================================================== */
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
@@ -794,15 +824,13 @@ export default function CashierPosPage() {
     let cancelled = false;
     const bootstrapId = ++bootstrapRequestId.current;
 
-    // Reset all volatile state
     bootstrappedRef.current = false;
     hydratedFromStorageRef.current = false;
-    setCatalogReady(false); // ✅ FIX #3: block prefetch during bootstrap
+    setCatalogReady(false);
 
     setError('');
     setSuccess('');
     setDrafts([]);
-    setCustomers([]);
     setSearch('');
     setDebouncedSearch('');
     setDraftSearch('');
@@ -814,15 +842,16 @@ export default function CashierPosPage() {
 
     const bootstrap = async () => {
       try {
-        // ✅ Run static data + drafts in parallel — they don't depend on each other
-        await Promise.all([
+        setProductsLoading(true);
+
+        const [, , productsResponse] = await Promise.all([
           loadStaticDataRef.current(),
           loadDraftsRef.current({ silent: true }),
+          productService.list({ store_id: Number(storeId), page: 1, is_active: true }),
         ]);
 
         if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
-        // ✅ Set filter ref before fetching so buildCacheKey key matches exactly
         productFiltersRef.current = {
           storeId: String(storeId || ''),
           activeCategoryId: null,
@@ -830,21 +859,12 @@ export default function CashierPosPage() {
           search: '',
         };
 
-        setProductsLoading(true);
-
-        const response = await productService.list({
-          store_id: Number(storeId),
-          page: 1,
-          is_active: true,
-        });
-
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+        const response = productsResponse;
 
         const meta = extractMeta(response);
         const items = extractList(response);
         const pageInfo = buildPageInfo(meta, items, 1);
 
-        // ✅ Cache key must exactly match what buildCacheKey() produces for page 1 / all
         const cacheKey = JSON.stringify({
           storeId: String(storeId),
           page: 1,
@@ -860,7 +880,6 @@ export default function CashierPosPage() {
 
         bootstrapProductsFetchedRef.current = true;
 
-        // ✅ Set lastProductFilterRef BEFORE bootstrappedRef so reload effect skips on mount
         lastProductFilterRef.current = JSON.stringify({
           storeId: String(storeId),
           categoryScope: 'all',
@@ -869,11 +888,8 @@ export default function CashierPosPage() {
 
         if (!cancelled && bootstrapId === bootstrapRequestId.current) {
           bootstrappedRef.current = true;
-
-          // ✅ FIX #3: Signal catalog is ready — prefetch effect can now fire
           setCatalogReady(true);
 
-          // Re-hydrate saved cart from localStorage
           const key = cartStorageKey(storeId, user?.user_id);
           cartStorageKeyRef.current = key;
           const saved = safeLoadCart(key);
@@ -919,43 +935,38 @@ export default function CashierPosPage() {
     return () => {
       cancelled = true;
     };
-  }, [storeId, user?.user_id]); // ✅ Minimal deps — callbacks read via stable refs
+  }, [storeId, user?.user_id, resetSale, resetProductState, resetCategoryState]);
 
-/* ----- PRODUCTS RELOAD on category/search/page change --------------- */
-useEffect(() => {
-  if (!storeId || !bootstrappedRef.current || !catalogReady) return;
+  /* ----- PRODUCTS RELOAD --------------------------------------------- */
+  useEffect(() => {
+    if (!storeId || !bootstrappedRef.current || !catalogReady) return;
 
-  // ✅ Skip the first trigger after bootstrap — products already loaded
-  if (bootstrapProductsFetchedRef.current) {
-    bootstrapProductsFetchedRef.current = false;
-    return;
-  }
-
-  const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
-
-  if (filtersChanged) {
-    prefetchedKeysRef.current.clear();
-
-    if (currentPage !== 1) {
-      setCurrentPage(1);
-      lastProductFilterRef.current = currentFilterSignature;
+    if (bootstrapProductsFetchedRef.current) {
+      bootstrapProductsFetchedRef.current = false;
       return;
     }
 
-    lastProductFilterRef.current = currentFilterSignature;
-    void loadProducts(1);
-    return;
-  }
+    const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
-  // Skip page 1 when filters unchanged — bootstrap already loaded it
-  if (currentPage === 1) return;
+    if (filtersChanged) {
+      prefetchedKeysRef.current.clear();
 
-  void loadProducts(currentPage);
-}, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady]);
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+        lastProductFilterRef.current = currentFilterSignature;
+        return;
+      }
+
+      lastProductFilterRef.current = currentFilterSignature;
+      void loadProducts(1);
+      return;
+    }
+
+    void loadProducts(currentPage);
+  }, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady]);
 
   /* ----- PRODUCT PREFETCH -------------------------------------------- */
   useEffect(() => {
-    // ✅ FIX #3: catalogReady prevents prefetch from racing bootstrap
     if (!bootstrappedRef.current || !catalogReady) return;
     if (productsLoading) return;
     if (!productPageInfo.hasNextPage) return;
@@ -966,7 +977,7 @@ useEffect(() => {
     productPageInfo.hasNextPage,
     prefetchNextPage,
     productsLoading,
-    catalogReady, // ✅ added
+    catalogReady,
   ]);
 
   /* =====================================================================
@@ -1009,6 +1020,7 @@ useEffect(() => {
           optimisticItemId = local.billing_item_id;
           draft.items.push(local);
         }
+
         return draft;
       });
 
@@ -1022,6 +1034,7 @@ useEffect(() => {
               (it) => String(it.billing_item_id) === String(optimisticItemId)
             );
             if (!liveItem || liveItem.__local) return;
+
             await billingService.updateItem(liveItem.billing_item_id, {
               quantity: liveItem.quantity,
               unit_price: liveItem.unit_price,
@@ -1032,62 +1045,25 @@ useEffect(() => {
               quantity: 1,
               unit_price: product.price,
             });
+
             const serverItem = created?.data || created;
+
             if (serverItem?.billing_item_id) {
               setBilling((prev) => {
                 if (!prev) return prev;
+
                 const items = (prev.items || []).map((it) =>
                   String(it.billing_item_id) === String(optimisticItemId)
                     ? { ...it, billing_item_id: serverItem.billing_item_id, __local: false }
                     : it
                 );
+
                 return recalcBillingTotals({ ...prev, items });
               });
             }
           }
         } catch (err) {
           setError(err?.response?.data?.message || err?.message || 'Background sync failed (add).');
-        }
-      });
-    },
-    [applyBillingMutation, enqueueSync]
-  );
-
-  const updateItemQuantity = useCallback(
-    (item, nextQuantity) => {
-      if (!item) return;
-      if (nextQuantity < 1) return removeItem(item.billing_item_id);
-
-      const targetId = item.billing_item_id;
-      setError('');
-
-      applyBillingMutation((draft) => {
-        const target = draft.items.find(
-          (it) => String(it.billing_item_id) === String(targetId)
-        );
-        if (!target) return draft;
-        const totals = calcLineFromGross(
-          nextQuantity,
-          target.unit_price,
-          target.vat_rate ?? DEFAULT_VAT_RATE
-        );
-        Object.assign(target, { quantity: nextQuantity, ...totals });
-        return draft;
-      });
-
-      const current = billingRef.current;
-      if (!current?.billing_id || item.__local) return;
-
-      enqueueSync(async () => {
-        try {
-          await billingService.updateItem(item.billing_item_id, {
-            quantity: nextQuantity,
-            unit_price: item.unit_price,
-          });
-        } catch (err) {
-          setError(
-            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
-          );
         }
       });
     },
@@ -1127,6 +1103,48 @@ useEffect(() => {
     [applyBillingMutation, enqueueSync]
   );
 
+  const updateItemQuantity = useCallback(
+    (item, nextQuantity) => {
+      if (!item) return;
+      if (nextQuantity < 1) return removeItem(item.billing_item_id);
+
+      const targetId = item.billing_item_id;
+      setError('');
+
+      applyBillingMutation((draft) => {
+        const target = draft.items.find(
+          (it) => String(it.billing_item_id) === String(targetId)
+        );
+        if (!target) return draft;
+
+        const totals = calcLineFromGross(
+          nextQuantity,
+          target.unit_price,
+          target.vat_rate ?? DEFAULT_VAT_RATE
+        );
+        Object.assign(target, { quantity: nextQuantity, ...totals });
+        return draft;
+      });
+
+      const current = billingRef.current;
+      if (!current?.billing_id || item.__local) return;
+
+      enqueueSync(async () => {
+        try {
+          await billingService.updateItem(item.billing_item_id, {
+            quantity: nextQuantity,
+            unit_price: item.unit_price,
+          });
+        } catch (err) {
+          setError(
+            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
+          );
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync, removeItem]
+  );
+
   const handlePayNow = useCallback(
     (product) => {
       handleAddProduct(product);
@@ -1147,7 +1165,7 @@ useEffect(() => {
     if (!current?.items?.length) return null;
     if (current.billing_id) return current;
 
-    await syncQueueRef.current.catch(() => {});
+    await syncQueueRef.current.catch(() => { });
 
     const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
@@ -1281,6 +1299,12 @@ useEffect(() => {
     if (!current?.items?.length) return;
     if (!validatePayment()) return;
 
+    if (current.status === 'paid') {
+      setError('This billing has already been paid.');
+      setShowPaymentModal(false);
+      return;
+    }
+
     setSubmitting(true);
     setError('');
     setSuccess('');
@@ -1306,7 +1330,8 @@ useEffect(() => {
       const paidResponse = await billingService.show(target.billing_id);
       const paidBilling = paidResponse?.data || paidResponse;
 
-      openBillingPrint(paidBilling, currentStore, 'receipt', printSettings);
+      const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
+      openBillingPrint(paidBilling, currentStore, printMode, printSettings);
 
       removeDraftPreview(target.billing_id);
       resetSale();
@@ -1356,6 +1381,16 @@ useEffect(() => {
     }
   };
 
+const handleCustomerSelect = useCallback((customerId, customerObject = null) => {
+  setSelectedCustomerId(customerId);
+  if (customerObject) {
+    setSelectedCustomer(customerObject); // ← set instantly, no fetch needed
+  } else {
+    setSelectedCustomer(null); // ← walk-in customer
+  }
+  setShowCustomerModal(false);
+}, []);
+
   const handleEscapeShortcut = useCallback(async () => {
     if (submitting) return;
 
@@ -1366,6 +1401,11 @@ useEffect(() => {
     }
     if (showDraftModal) {
       setShowDraftModal(false);
+      focusSearchInput(true);
+      return;
+    }
+    if (showCustomerModal) {
+      setShowCustomerModal(false);
       focusSearchInput(true);
       return;
     }
@@ -1399,6 +1439,7 @@ useEffect(() => {
     submitting,
     showPaymentModal,
     showDraftModal,
+    showCustomerModal,
     search,
     focusSearchInput,
     removeDraftPreview,
@@ -1434,7 +1475,8 @@ useEffect(() => {
         !blockedTarget &&
         !typingTarget &&
         !showPaymentModal &&
-        !showDraftModal;
+        !showDraftModal &&
+        !showCustomerModal;
 
       if (wantsCheckout && !submitting && billingRef.current?.items?.length) {
         event.preventDefault();
@@ -1444,7 +1486,14 @@ useEffect(() => {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [submitting, showPaymentModal, showDraftModal, focusSearchInput, handleEscapeShortcut]);
+  }, [
+    submitting,
+    showPaymentModal,
+    showDraftModal,
+    showCustomerModal,
+    focusSearchInput,
+    handleEscapeShortcut,
+  ]);
 
   /* =====================================================================
      DERIVED RENDER VALUES
@@ -1474,16 +1523,11 @@ useEffect(() => {
     });
   }, [drafts, draftSearch]);
 
-  const selectedCustomer = useMemo(
-    () => customers.find((c) => String(getCustomerId(c)) === String(selectedCustomerId)) || null,
-    [customers, selectedCustomerId]
-  );
-
   const customerCurrentBalance = Number(
     selectedCustomer?.current_balance ??
-      selectedCustomer?.balance ??
-      selectedCustomer?.opening_balance ??
-      0
+    selectedCustomer?.balance ??
+    selectedCustomer?.opening_balance ??
+    0
   );
 
   /* =====================================================================
@@ -1537,7 +1581,9 @@ useEffect(() => {
             </div>
           </div>
           <div className="card">
-            <p><strong>No stores assigned</strong></p>
+            <p>
+              <strong>No stores assigned</strong>
+            </p>
             <p className="muted" style={{ marginTop: 8 }}>
               Your account does not have any store assigned. Please contact your administrator.
             </p>
@@ -1654,51 +1700,22 @@ useEffect(() => {
           ) : (
             <>
               {error ? <div className="form-error">{error}</div> : null}
+              {success ? <div className="form-success">{success}</div> : null}
               {productsLoading ? <div className="page-loader">Loading products...</div> : null}
 
               <div className="products-grid products-grid-enhanced">
-                {products.map((product) => {
-                  const image = getProductImage(product);
-
-                  return (
-                    <article key={product.product_id} className="product-card">
-                      <div
-                        className="product-card-overlay"
-                        style={{
-                          backgroundImage: image
-                            ? `url(${image})`
-                            : `linear-gradient(135deg, #427E97 0%, #E17A38 100%)`,
-                          backgroundSize: 'cover',
-                          backgroundPosition: 'center',
-                          backgroundRepeat: 'no-repeat',
-                        }}
-                      >
-                        <div className="product-card-actions">
-                          <button
-                            type="button"
-                            className="primary-button pay-now-btn"
-                            disabled={submitting}
-                            onClick={() => handlePayNow(product)}
-                          >
-                            Pay Now
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost-button add-btn"
-                            onClick={() => handleAddProduct(product)}
-                          >
-                            Add
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="product-card-info">
-                        <h3>{product.product_name}</h3>
-                        <strong>{currency(product.price, currentStore?.currency)}</strong>
-                      </div>
-                    </article>
-                  );
-                })}
+                {products.map((product) => (
+                  <ProductCard
+                    key={product.product_id}
+                    product={product}
+                    currentStore={currentStore}
+                    submitting={submitting}
+                    onPayNow={handlePayNow}
+                    onAddProduct={handleAddProduct}
+                    currency={currency}
+                    getProductImage={getProductImage}
+                  />
+                ))}
 
                 {!productsLoading && !products.length ? (
                   <div className="card">
@@ -1756,7 +1773,7 @@ useEffect(() => {
                 <p className="invoice-subtext">
                   {billing
                     ? billing.invnumber ||
-                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                    (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
                     : 'No active billing yet'}
                 </p>
               </div>
@@ -1771,52 +1788,60 @@ useEffect(() => {
                 <div className="selected-customer-box">
                   <div className="customer-meta">
                     <span className="meta-label">Customer</span>
-                    <strong>{selectedCustomer?.full_name || 'Selected Customer'}</strong>
+                    <strong>
+                      {selectedCustomer?.full_name ||
+                        (selectedCustomerId ? 'Loading...' : 'Customer')}
+                    </strong>
                   </div>
-                  <button
-                    type="button"
-                    className="change-customer-btn"
-                    onClick={() => setSelectedCustomerId('')}
-                  >
-                    Change
-                  </button>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className="change-customer-btn"
+                      onClick={() => setShowCustomerModal(true)}
+                    >
+                      Change
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button view-drafts-btn"
+                      onClick={async () => {
+                        setShowDraftModal(true);
+                        await loadDrafts();
+                      }}
+                    >
+                      <FolderClock size={16} />
+                      Drafts ({drafts.length})
+                    </button>
+                  </div>
                 </div>
               ) : (
-                <div className="form-grid">
-                  <label>
-                    Customer Account
-                    <select
-                      className="select-input"
-                      value={selectedCustomerId}
-                      onChange={(e) => setSelectedCustomerId(e.target.value)}
+                <div className="selected-customer-box">
+                  <div className="customer-meta">
+                    <span className="meta-label">Customer</span>
+                    <strong>Customer</strong>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className="change-customer-btn"
+                      onClick={() => setShowCustomerModal(true)}
                     >
-                      <option value="">Customer</option>
-                      {customers.map((customer) => (
-                        <option
-                          key={String(getCustomerId(customer))}
-                          value={String(getCustomerId(customer))}
-                        >
-                          {customer.full_name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      Select Customer
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button view-drafts-btn"
+                      onClick={async () => {
+                        setShowDraftModal(true);
+                        await loadDrafts();
+                      }}
+                    >
+                      <FolderClock size={16} />
+                      Drafts ({drafts.length})
+                    </button>
+                  </div>
                 </div>
               )}
-            </div>
-
-            <div className="hero-quick-actions">
-              <button
-                type="button"
-                className="ghost-button view-drafts-btn"
-                onClick={async () => {
-                  setShowDraftModal(true);
-                  await loadDrafts();
-                }}
-              >
-                <FolderClock size={16} />
-                Drafts ({drafts.length})
-              </button>
               {draftsLoading && <span className="inline-note-spinner">Refreshing drafts...</span>}
             </div>
           </div>
@@ -1954,385 +1979,57 @@ useEffect(() => {
         </aside>
       </section>
 
-      {showPaymentModal ? (
-        <div className="modal-backdrop" onClick={() => !submitting && setShowPaymentModal(false)}>
-          <div className="modal-card payment-modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div>
-                <h3>Payment</h3>
-                <p className="muted">{billing?.invnumber || `Draft #${billing?.billing_id || ''}`}</p>
-              </div>
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setShowPaymentModal(false)}
-                disabled={submitting}
-              >
-                <X size={18} />
-              </button>
-            </div>
+      <PaymentModal
+        isOpen={showPaymentModal}
+        billing={billing}
+        currentStore={currentStore}
+        itemCount={itemCount}
+        selectedCustomer={selectedCustomer}
+        customerCurrentBalance={customerCurrentBalance}
+        paymentMethod={paymentMethod}
+        amountReceived={amountReceived}
+        setAmountReceived={setAmountReceived}
+        amountTendered={amountTendered}
+        setAmountTendered={setAmountTendered}
+        mpesaPhone={mpesaPhone}
+        setMpesaPhone={setMpesaPhone}
+        mpesaCode={mpesaCode}
+        setMpesaCode={setMpesaCode}
+        cardReference={cardReference}
+        setCardReference={setCardReference}
+        cardHolder={cardHolder}
+        setCardHolder={setCardHolder}
+        submitting={submitting}
+        currency={currency}
+        onPaymentMethodChange={handlePaymentMethodChange}
+        onClose={() => setShowPaymentModal(false)}
+        onCharge={handleCharge}
+      />
 
-            <div className="modal-content payment-modal-content">
-              <div className="payment-summary-strip">
-                <div className="payment-summary-pill">
-                  <span>Total due</span>
-                  <strong>{currency(billing?.total || 0, currentStore?.currency)}</strong>
-                </div>
-                <div className="payment-summary-pill">
-                  <span>Items</span>
-                  <strong>{itemCount}</strong>
-                </div>
-                {selectedCustomerId ? (
-                  <div className="payment-summary-pill">
-                    <span>Customer</span>
-                    <strong>{selectedCustomer?.full_name || 'Selected'}</strong>
-                  </div>
-                ) : null}
-              </div>
+      <DraftModal
+        isOpen={showDraftModal}
+        onClose={() => setShowDraftModal(false)}
+        draftSearch={draftSearch}
+        setDraftSearch={setDraftSearch}
+        draftsLoading={draftsLoading}
+        filteredDrafts={filteredDrafts}
+        billing={billing}
+        currentStore={currentStore}
+        currency={currency}
+        formatDateTime={formatDateTime}
+        onLoadDraft={handleLoadDraft}
+        onDeleteDraft={handleDeleteDraft}
+        submitting={submitting}
+      />
 
-              <div className="payment-method-card-grid">
-                {PAYMENT_METHODS.map((method) => {
-                  const Icon = method.icon;
-                  return (
-                    <button
-                      key={method.key}
-                      type="button"
-                      className={`payment-method-card ${paymentMethod === method.key ? 'active' : ''}`}
-                      onClick={() => handlePaymentMethodChange(method.key)}
-                    >
-                      <div className="payment-method-card-top">
-                        <span className="payment-method-icon"><Icon size={18} /></span>
-                        <strong>{method.title}</strong>
-                      </div>
-                      <p>{method.description}</p>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {paymentMethod ? (
-                <div className="payment-fields-card">
-                  {paymentMethod === 'cash' ? (
-                    <div className="form-grid two-columns payment-fields-grid">
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>
-                          Amount to be paid
-                          {selectedCustomer && (() => {
-                            const activeBalance = Number(
-                              billing?.customer?.current_balance ??
-                              selectedCustomer?.current_balance ??
-                              customerCurrentBalance ??
-                              0
-                            );
-                            return activeBalance > 0 ? (
-                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
-                                ({`+${activeBalance.toFixed(2)}`})
-                              </span>
-                            ) : null;
-                          })()}
-                        </span>
-                        <input
-                          className="text-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={amountReceived}
-                          onChange={(e) => setAmountReceived(e.target.value)}
-                          placeholder="Amount to be paid"
-                        />
-                      </label>
-
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>Cash received</span>
-                        <input
-                          className="text-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={amountTendered}
-                          onChange={(e) => setAmountTendered(e.target.value)}
-                          placeholder="Cash tendered"
-                        />
-                      </label>
-
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>Change</span>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={(() => {
-                            const cashTendered = Number(amountTendered || 0);
-                            const invoiceAmount = Number(amountReceived || billing?.total || 0);
-                            const legacyDebt = selectedCustomer
-                              ? Number(
-                                  billing?.customer?.current_balance ??
-                                  selectedCustomer?.current_balance ??
-                                  customerCurrentBalance ??
-                                  0
-                                )
-                              : 0;
-                            const totalTarget = invoiceAmount + legacyDebt;
-                            const realChange = cashTendered - totalTarget;
-                            return realChange > 0 ? realChange.toFixed(2) : '0.00';
-                          })()}
-                          readOnly
-                          placeholder="0.00"
-                          style={{ fontWeight: 'bold', backgroundColor: '#f5f5f5' }}
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-
-                  {paymentMethod === 'mpesa' ? (
-                    <div className="form-grid two-columns payment-fields-grid">
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>
-                          Amount to be paid
-                          {selectedCustomer && (() => {
-                            const activeBalance = Number(
-                              billing?.customer?.current_balance ??
-                              selectedCustomer?.current_balance ??
-                              customerCurrentBalance ??
-                              0
-                            );
-                            return activeBalance > 0 ? (
-                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
-                                ({`+${activeBalance.toFixed(2)}`})
-                              </span>
-                            ) : null;
-                          })()}
-                        </span>
-                        <input
-                          className="text-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={(() => {
-                            const invoiceAmount = Number(billing?.total || 0);
-                            const legacyDebt = selectedCustomer
-                              ? Number(
-                                  billing?.customer?.current_balance ??
-                                  selectedCustomer?.current_balance ??
-                                  customerCurrentBalance ??
-                                  0
-                                )
-                              : 0;
-                            return amountReceived || (invoiceAmount + legacyDebt).toFixed(2);
-                          })()}
-                          onChange={(e) => setAmountReceived(e.target.value)}
-                          placeholder="Amount to be paid"
-                        />
-                      </label>
-
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>MPESA phone number</span>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={mpesaPhone}
-                          onChange={(e) => setMpesaPhone(e.target.value)}
-                          placeholder="e.g. 07XXXXXXXX"
-                        />
-                      </label>
-
-                      <label
-                        className="span-2"
-                        style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
-                      >
-                        <span>MPESA transaction code</span>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={mpesaCode}
-                          onChange={(e) => setMpesaCode(e.target.value)}
-                          placeholder="Enter transaction code"
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-
-                  {paymentMethod === 'card' ? (
-                    <div className="form-grid two-columns payment-fields-grid">
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>
-                          Amount to be paid
-                          {selectedCustomer && (() => {
-                            const activeBalance = Number(
-                              billing?.customer?.current_balance ??
-                              selectedCustomer?.current_balance ??
-                              customerCurrentBalance ??
-                              0
-                            );
-                            return activeBalance > 0 ? (
-                              <span style={{ color: '#2563eb', fontWeight: 'bold', marginLeft: '6px' }}>
-                                ({`+${activeBalance.toFixed(2)}`})
-                              </span>
-                            ) : null;
-                          })()}
-                        </span>
-                        <input
-                          className="text-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={(() => {
-                            const invoiceAmount = Number(billing?.total || 0);
-                            const legacyDebt = selectedCustomer
-                              ? Number(
-                                  billing?.customer?.current_balance ??
-                                  selectedCustomer?.current_balance ??
-                                  customerCurrentBalance ??
-                                  0
-                                )
-                              : 0;
-                            return amountReceived || (invoiceAmount + legacyDebt).toFixed(2);
-                          })()}
-                          onChange={(e) => setAmountReceived(e.target.value)}
-                          placeholder="Paid amount"
-                        />
-                      </label>
-
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        <span>Card holder</span>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={cardHolder}
-                          onChange={(e) => setCardHolder(e.target.value)}
-                          placeholder="Card holder name"
-                        />
-                      </label>
-
-                      <label
-                        className="span-2"
-                        style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
-                      >
-                        <span>Card reference</span>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={cardReference}
-                          onChange={(e) => setCardReference(e.target.value)}
-                          placeholder="POS slip or card reference"
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="payment-empty-state">
-                  <p>Select a payment method to show the required fields.</p>
-                </div>
-              )}
-
-              <div className="payment-modal-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleCharge}
-                  disabled={!billing?.items?.length || submitting || !paymentMethod}
-                >
-                  Charge Payment
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setShowPaymentModal(false)}
-                  disabled={submitting}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {showDraftModal ? (
-        <div className="modal-backdrop" onClick={() => setShowDraftModal(false)}>
-          <div className="modal-card draft-modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div>
-                <h3>Saved Drafts</h3>
-                <p className="muted">Only your drafts for this store are shown</p>
-              </div>
-              <button type="button" className="icon-button" onClick={() => setShowDraftModal(false)}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="toolbar-row pos-toolbar-wrap" style={{ marginBottom: 12 }}>
-              <div className="search-shell">
-                <Search className="search-icon-pos" size={16} />
-                <input
-                  value={draftSearch}
-                  onChange={(e) => setDraftSearch(e.target.value)}
-                  placeholder="Search drafts by invoice, customer, phone, email or note"
-                />
-              </div>
-            </div>
-
-            <div className="draft-modal-list">
-              {draftsLoading ? (
-                <div className="empty-draft-state">
-                  <p>Loading drafts...</p>
-                </div>
-              ) : filteredDrafts.length ? (
-                filteredDrafts.map((draft) => (
-                  <div
-                    key={draft.billing_id}
-                    className={`draft-modal-row ${
-                      String(billing?.billing_id) === String(draft.billing_id) ? 'active' : ''
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      className="draft-modal-row-main"
-                      onClick={() => handleLoadDraft(draft.billing_id)}
-                    >
-                      <div className="draft-modal-main">
-                        <strong>{draft.invnumber || `Draft #${draft.billing_id}`}</strong>
-                        <p>{draft.customer?.full_name || 'Customer'}</p>
-                        {draft.customer?.phone ? <small>{draft.customer.phone}</small> : null}
-                        {draft.customer?.email ? <small>{draft.customer.email}</small> : null}
-                        {draft.notes ? <span className="draft-note">{draft.notes}</span> : null}
-                      </div>
-                      <div className="align-right draft-side-meta">
-                        <strong>{currency(draft.total || 0, currentStore?.currency)}</strong>
-                        <p>{formatDateTime(draft.billing_date)}</p>
-                      </div>
-                    </button>
-
-                    <div className="draft-modal-actions">
-                      <button
-                        type="button"
-                        className="ghost-button draft-edit-button"
-                        onClick={() => handleLoadDraft(draft.billing_id)}
-                        disabled={submitting}
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        type="button"
-                        className="ghost-button danger-button"
-                        onClick={() => handleDeleteDraft(draft.billing_id)}
-                        disabled={submitting}
-                      >
-                        <Trash2 size={14} /> Delete
-                      </button>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-draft-state">
-                  <p>No drafts matched your search.</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <CustomerModal
+        isOpen={showCustomerModal}
+        onClose={() => setShowCustomerModal(false)}
+        selectedCustomerId={selectedCustomerId}
+        currentStore={currentStore}
+        currency={currency}
+        onSelectCustomer={handleCustomerSelect}
+      />
     </>
   );
 }

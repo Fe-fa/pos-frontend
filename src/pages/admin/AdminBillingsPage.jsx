@@ -5,57 +5,10 @@ import { billingService } from '../../services/billingService';
 import { currency, formatDateTime } from '../../utils/helpers';
 import { mergeStoreSettings } from '../../utils/storeSettings';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
+import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
 
-const EMPTY_META = {
-  current_page: 1,
-  last_page: 1,
-  per_page: 5, // Default fallback matching your backend fallback configuration
-  total: 0,
-  from: null,
-  to: null,
-  has_next_page: false,
-  has_prev_page: false,
-};
-
-const extractPaginated = (response, defaultLimit = 5) => {
-  const payload = response?.data ?? response ?? {};
-
-  let items = [];
-  if (Array.isArray(payload.data)) {
-    items = payload.data;
-  } else if (Array.isArray(payload)) {
-    items = payload;
-  }
-  const rawMeta = payload.meta ?? response?.meta ?? {};
-  const total = Number(rawMeta.total ?? payload.total ?? items.length ?? 0);
-  const currentPage = Number(rawMeta.current_page ?? payload.current_page ?? 1);
-  const perPage = Number(rawMeta.per_page ?? payload.per_page ?? defaultLimit);
-  const lastPage = Number(rawMeta.last_page ?? payload.last_page ?? Math.max(1, Math.ceil(total / perPage)));
-
-  const hasNextPage = typeof rawMeta.has_next_page === 'boolean' 
-    ? rawMeta.has_next_page 
-    : currentPage < lastPage;
-
-  const hasPrevPage = typeof rawMeta.has_prev_page === 'boolean' 
-    ? rawMeta.has_prev_page 
-    : currentPage > 1;
-
-  return {
-    data: items,
-    meta: {
-      current_page: currentPage,
-      last_page: lastPage,
-      per_page: perPage,
-      total,
-      from: rawMeta.from ?? payload.from ?? (total ? (currentPage - 1) * perPage + 1 : null),
-      to: rawMeta.to ?? payload.to ?? (total ? Math.min(currentPage * perPage, total) : null),
-      has_next_page: hasNextPage,
-      has_prev_page: hasPrevPage,
-    },
-  };
-};
 
 const extractRecord = (response) => {
   return response?.data?.data || response?.data || response || null;
@@ -73,6 +26,17 @@ const getLatestPayment = (billing) => {
   return payments[0] || null;
 };
 
+const getLatestReceiptNumber = (billing) => {
+  const payments = Array.isArray(billing?.payments) ? [...billing.payments] : [];
+  if (!payments.length) return null;
+
+  payments.sort(
+    (a, b) => new Date(b?.payment_date || 0).getTime() - new Date(a?.payment_date || 0).getTime()
+  );
+
+  return payments[0]?.receiptnumber || null;
+};
+
 export default function AdminBillingsPage() {
   const { stores, storeId } = useStore();
   const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
@@ -81,14 +45,13 @@ export default function AdminBillingsPage() {
   const [billings, setBillings] = useState([]);
   const [meta, setMeta] = useState(EMPTY_META);
   const [page, setPage] = useState(1);
-  
-  // 🌟 Kept state to keep UI synchronized with backend layout controls
-  const [perPage, setPerPage] = useState(5); 
-  
+
+  const [perPage, setPerPage] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [scope, setScope] = useState('active');
-  
+
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
@@ -108,12 +71,31 @@ export default function AdminBillingsPage() {
     return () => clearTimeout(handler);
   }, [search]);
 
-  // Pulls records safely matching structural filter mutations
+  useEffect(() => {
+    setBillings([]);
+    setMeta({ ...EMPTY_META });
+    setPage(1);
+    setPerPage(null);
+    setSearch('');
+    setDebouncedSearch('');
+    setStatus('');
+    setScope('active');
+    setSelectedBilling(null);
+    setError('');
+    setSuccess('');
+  }, [storeId]);
+
   const loadBillings = useCallback(
-    async (targetPage, currentPerPage = perPage, currentStatus = status, currentScope = scope, currentSearch = debouncedSearch) => {
+    async (
+      targetPage,
+      currentPerPage = perPage,
+      currentStatus = status,
+      currentScope = scope,
+      currentSearch = debouncedSearch
+    ) => {
       if (!storeId) {
         setBillings([]);
-        setMeta(EMPTY_META);
+        setMeta({ ...EMPTY_META });
         setLoading(false);
         return;
       }
@@ -126,47 +108,32 @@ export default function AdminBillingsPage() {
         const params = {
           page: targetPage,
           store_id: storeId,
-          per_page: currentPerPage, // Send customized page limits upstream
+          per_page: currentPerPage ?? 5, // ← safe fallback for first request
         };
 
-        if (currentSearch.trim()) {
-          params.search = currentSearch.trim();
-        }
-
-        if (currentStatus && currentStatus !== 'draft') {
-          params.status = currentStatus;
-        }
-
-        if (currentStatus === 'draft') {
-          params.is_draft = true;
-        }
-
-        if (currentScope === 'trashed') {
-          params.only_trashed = true;
-        } else if (currentScope === 'all') {
-          params.with_trashed = true;
-        }
+        if (currentSearch.trim()) params.search = currentSearch.trim();
+        if (currentStatus && currentStatus !== 'draft') params.status = currentStatus;
+        if (currentStatus === 'draft') params.is_draft = true;
+        if (currentScope === 'trashed') params.only_trashed = true;
+        else if (currentScope === 'all') params.with_trashed = true;
 
         const response = await billingService.list(params);
 
         if (requestId !== requestRef.current) return;
 
-        // Extract metadata cleanly using dynamic backend layout parameters
-        const parsed = extractPaginated(response, currentPerPage); 
-        
+        const parsed = extractPaginated(response, currentPerPage ?? 5);
         setMeta(parsed.meta);
-        setPerPage(parsed.meta.per_page); // State sync successfully happens outside the effect cycle dependency now!
         setBillings(parsed.data || []);
+
+        // Bootstrap perPage from backend on first load
+        if (perPage === null) setPerPage(parsed.meta.per_page);
       } catch (err) {
         if (requestId !== requestRef.current) return;
-
         setError(err?.response?.data?.message || 'Unable to load billing records.');
         setBillings([]);
-        setMeta(EMPTY_META);
+        setMeta({ ...EMPTY_META });
       } finally {
-        if (requestId === requestRef.current) {
-          setLoading(false);
-        }
+        if (requestId === requestRef.current) setLoading(false);
       }
     },
     [storeId]
@@ -356,17 +323,12 @@ export default function AdminBillingsPage() {
             <span className="muted">Show</span>
             <select
               className="select-input slim"
-              value={perPage}
-              onChange={(e) => {
-                setPerPage(Number(e.target.value));
-                setPage(1);
-              }}
-              disabled={!storeId}
+              value={perPage ?? 5}
+              onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+              disabled={!storeId} // ← disable until bootstrapped
             >
               {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
+                <option key={size} value={size}>{size}</option>
               ))}
             </select>
           </label>
@@ -424,7 +386,11 @@ export default function AdminBillingsPage() {
 
                   return (
                     <tr key={billing.billing_id} className={isDeleted ? 'row-soft-deleted' : ''}>
-                      <td>{billing.invnumber || `Draft #${billing.billing_id}`}</td>
+<td>
+  {billing.status === 'paid'
+    ? (getLatestReceiptNumber(billing) || billing.invnumber || `Draft #${billing.billing_id}`)
+    : (billing.invnumber || `Draft #${billing.billing_id}`)}
+</td>
                       <td>{billing.customer?.full_name || 'Walk-in customer'}</td>
                       <td>{currency(Number(billing.total || 0), currentStore?.currency)}</td>
                       <td>{currency(Number(billing.paid_amount || 0), currentStore?.currency)}</td>
@@ -483,7 +449,10 @@ export default function AdminBillingsPage() {
             style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
           >
             <span className="muted">
-              Page {meta.current_page} of {meta.last_page} (Items per page: {perPage})
+              {meta.from && meta.to
+                ? `Showing ${meta.from}–${meta.to} of ${meta.total}` // ← now works with from/to from backend
+                : `${billings.length} items`}
+              {loading && billings.length ? ' • refreshing...' : ''}
             </span>
 
             <div className="row-actions compact">
@@ -520,7 +489,11 @@ export default function AdminBillingsPage() {
             <div className="detail-grid">
               <div>
                 <p className="muted">Billing ref</p>
-                <strong>{selectedBilling.invnumber || `Draft #${selectedBilling.billing_id}`}</strong>
+                <strong>
+  {selectedBilling.status === 'paid'
+    ? (getLatestReceiptNumber(selectedBilling) || selectedBilling.invnumber || `Draft #${selectedBilling.billing_id}`)
+    : (selectedBilling.invnumber || `Draft #${selectedBilling.billing_id}`)}
+</strong>
               </div>
 
               <div>
@@ -605,9 +578,9 @@ export default function AdminBillingsPage() {
                           {currency(
                             Number(
                               item.total_amount ??
-                                item.line_total ??
-                                item.line_subtotal ??
-                                Number(item.quantity || 0) * Number(item.unit_price || 0)
+                              item.line_total ??
+                              item.line_subtotal ??
+                              Number(item.quantity || 0) * Number(item.unit_price || 0)
                             ),
                             currentStore?.currency
                           )}

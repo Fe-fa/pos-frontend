@@ -34,7 +34,7 @@ const adminNavItems = [
 ];
 
 const managerNavItems = [
-  { to: '/admin/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/admin/manager', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/admin/users', label: 'Users', icon: Users },
   { to: '/admin/cashiers', label: 'Cashiers', icon: Users },
   { to: '/admin/customers', label: 'Customers', icon: Users },
