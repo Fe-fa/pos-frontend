@@ -7,8 +7,12 @@ function hasRole(user, allowedRoles) {
   return allowedRoles.includes(user?.role);
 }
 
-export default function ProtectedRoute({ allowedRoles = [], requireStoreAssignment = false }) {
-  const { user, loading, isAuthenticated } = useAuth();
+export default function ProtectedRoute({
+  allowedRoles = [],
+  requireStoreAssignment = false,
+  requirePermission = null,   // ← e.g. requirePermission="categories.manage"
+}) {
+  const { user, loading, isAuthenticated, can } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -34,6 +38,11 @@ export default function ProtectedRoute({ allowedRoles = [], requireStoreAssignme
   }
 
   if (!hasRole(user, allowedRoles)) {
+    return <Navigate to={getUserHomePath(user)} replace />;
+  }
+
+  // Permission gate — redirect home if user lacks the required permission
+  if (requirePermission && !can(requirePermission)) {
     return <Navigate to={getUserHomePath(user)} replace />;
   }
 

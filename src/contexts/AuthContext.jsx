@@ -45,7 +45,14 @@ export function AuthProvider({ children }) {
     localStorage.setItem(storageKeys.token, response.access_token);
     writeJSON(storageKeys.user, response.user);
     setUser(response.user);
-    return response.user;
+
+    // Fetch fresh permissions so any recent changes take effect
+    try {
+      const freshUser = await refreshProfile();
+      return freshUser;
+    } catch {
+      return response.user;
+    }
   };
 
   const register = async (payload) => authService.register(payload);
@@ -55,18 +62,31 @@ export function AuthProvider({ children }) {
     clearSession();
   };
 
+  const can = useCallback((permission) => {
+    if (!user) return false;
+    if (user.role === 'admin') return true;
+    return Array.isArray(user.permissions) && user.permissions.includes(permission);
+  }, [user]);
+
+  const hasRole = useCallback((...roles) => {
+    if (!user) return false;
+    return roles.includes(user.role);
+  }, [user]);
+
   const value = useMemo(() => ({
     user,
     loading,
     isAuthenticated: !!user,
     hasStoreAssignment: userHasStoreAssignment(user),
+    can,
+    hasRole,
     login,
     register,
     logout,
     refreshProfile,
     setUser,
     clearSession,
-  }), [clearSession, loading, refreshProfile, user]);
+  }), [can, clearSession, hasRole, loading, refreshProfile, user]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

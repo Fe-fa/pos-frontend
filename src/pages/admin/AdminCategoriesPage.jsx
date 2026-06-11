@@ -2,6 +2,7 @@ import { X, Edit, Trash2, ChevronDown } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { categoryService } from '../../services/categoryService';
 import { useStore } from '../../contexts/StoreContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
 const initialForm = { category_name: '' };
@@ -9,6 +10,9 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 export default function AdminCategoriesPage() {
   const { storeId } = useStore();
+  const { can } = useAuth();
+
+  const canManage = can('categories.manage'); // ← true for admin, true for manager with permission
 
   const [categories, setCategories] = useState([]);
   const [meta, setMeta] = useState({ ...EMPTY_META });
@@ -30,7 +34,6 @@ export default function AdminCategoriesPage() {
     const timer = setTimeout(() => {
       setDebouncedSearch(search.trim());
     }, SEARCH_DEBOUNCE_MS);
-
     return () => clearTimeout(timer);
   }, [search]);
 
@@ -47,10 +50,10 @@ export default function AdminCategoriesPage() {
 
     try {
       const response = await categoryService.list({
-  store_id: Number(storeId),
-  search: debouncedSearch || undefined,
-  page,
-  per_page: perPage, // ← was: 10, now dynamic based on user selection
+        store_id: Number(storeId),
+        search: debouncedSearch || undefined,
+        page,
+        per_page: perPage,
       });
 
       const parsed = extractPaginated(response, perPage);
@@ -74,7 +77,6 @@ export default function AdminCategoriesPage() {
     setForm(initialForm);
     setError('');
     setPage(1);
-
     if (!storeId) setLoading(false);
   }, [storeId]);
 
@@ -101,6 +103,7 @@ export default function AdminCategoriesPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!canManage) return;
     setError('');
     setSubmitting(true);
 
@@ -136,6 +139,7 @@ export default function AdminCategoriesPage() {
   };
 
   const handleEdit = (category) => {
+    if (!canManage) return;
     setEditingId(category.category_id);
     setForm({ category_name: category.category_name || '' });
     setError('');
@@ -143,6 +147,7 @@ export default function AdminCategoriesPage() {
   };
 
   const handleDelete = async (categoryId) => {
+    if (!canManage) return;
     if (!window.confirm('Delete this category?')) return;
 
     try {
@@ -165,19 +170,22 @@ export default function AdminCategoriesPage() {
           <div className="catalog-hero-copy">
             <h3 className="catalog-title">Categories</h3>
             <p className="catalog-subtitle">
-              Showing {meta.from}-{meta.to} of {meta.total} 
+              Showing {meta.from}-{meta.to} of {meta.total}
             </p>
           </div>
 
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={openCreateModal}
-            style={{ whiteSpace: 'nowrap' }}
-            disabled={!storeId}
-          >
-            New category
-          </button>
+          {/* Only show New Category button if user can manage */}
+          {canManage && (
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={openCreateModal}
+              style={{ whiteSpace: 'nowrap' }}
+              disabled={!storeId}
+            >
+              New category
+            </button>
+          )}
         </div>
 
         <div className="catalog-toolbar">
@@ -193,28 +201,28 @@ export default function AdminCategoriesPage() {
               disabled={!storeId}
             />
           </label>
-            <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-    <ChevronDown
-      size={14}
-      style={{
-        position: 'absolute',
-        right: 8,
-        pointerEvents: 'none',
-        color: 'var(--color-text-secondary)',
-      }}
-    />
-    <select
-      className="text-input"
-      value={perPage}
-      onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
-      disabled={!storeId}
-      style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
-    >
-      {[3, 5, 10, 25, 50].map(n => (
-        <option key={n} value={n}>{n}</option>
-      ))}
-    </select>
-  </div>
+          <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+            <ChevronDown
+              size={14}
+              style={{
+                position: 'absolute',
+                right: 8,
+                pointerEvents: 'none',
+                color: 'var(--color-text-secondary)',
+              }}
+            />
+            <select
+              className="text-input"
+              value={perPage}
+              onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+              disabled={!storeId}
+              style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+            >
+              {[3, 5, 10, 25, 50].map(n => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </div>
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
 
@@ -227,33 +235,46 @@ export default function AdminCategoriesPage() {
                 <tr>
                   <th>Name</th>
                   <th>Products</th>
-                  <th>Actions</th>
+                  {/* Only show Actions column if user can manage */}
+                  {canManage && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {!storeId ? (
-                  <tr><td colSpan="3">Select a store first.</td></tr>
+                  <tr><td colSpan={canManage ? 3 : 2}>Select a store first.</td></tr>
                 ) : loading ? (
-                  <tr><td colSpan="3">Loading...</td></tr>
+                  <tr><td colSpan={canManage ? 3 : 2}>Loading...</td></tr>
                 ) : categories.length ? (
                   categories.map((category) => (
                     <tr key={category.category_id}>
                       <td>{category.category_name}</td>
                       <td>{category.products_count || 0}</td>
-                      <td>
-                        <div className="row-actions compact">
-                          <button type="button" className="ghost-button" onClick={() => handleEdit(category)} title="Edit">
-                            <Edit size={16} />
-                          </button>
-                          <button type="button" className="ghost-button danger" onClick={() => handleDelete(category.category_id)} title="Delete">
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
+                      {canManage && (
+                        <td>
+                          <div className="row-actions compact">
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => handleEdit(category)}
+                              title="Edit"
+                            >
+                              <Edit size={16} />
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-button danger"
+                              onClick={() => handleDelete(category.category_id)}
+                              title="Delete"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))
                 ) : (
-                  <tr><td colSpan="3">No categories found.</td></tr>
+                  <tr><td colSpan={canManage ? 3 : 2}>No categories found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -264,7 +285,6 @@ export default function AdminCategoriesPage() {
               <div className="pagination-summary">
                 Page <strong>{meta.current_page}</strong> of <strong>{meta.last_page}</strong>
               </div>
-
               <div className="pagination-controls">
                 <button
                   type="button"
@@ -274,7 +294,6 @@ export default function AdminCategoriesPage() {
                 >
                   Previous
                 </button>
-
                 <button
                   type="button"
                   className="ghost-button pagination-btn"
@@ -289,7 +308,7 @@ export default function AdminCategoriesPage() {
         </article>
       </section>
 
-      {showModal ? (
+      {showModal && canManage ? (
         <div className="modal-backdrop" onClick={closeModal}>
           <div className="modal-card form-modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
