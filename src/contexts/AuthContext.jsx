@@ -8,6 +8,8 @@ export { useAuth } from '../hooks/useAuth';
 
 let inflightProfileFetch = null;
 
+const PERMISSION_REFRESH_INTERVAL = 5 * 60 * 1000; // refresh every 5 minutes
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(readJSON(storageKeys.user, null));
   const [loading, setLoading] = useState(!!localStorage.getItem(storageKeys.token));
@@ -32,6 +34,7 @@ export function AuthProvider({ children }) {
     return response.user;
   }, []);
 
+  // Bootstrap — verify token and load fresh permissions on mount
   useEffect(() => {
     const token = localStorage.getItem(storageKeys.token);
     if (!token) { setLoading(false); return; }
@@ -40,13 +43,28 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, [clearSession, refreshProfile]);
 
+  // Periodic permission refresh — picks up backend changes every 5 minutes
+  useEffect(() => {
+    if (!user) return;
+
+    const interval = setInterval(async () => {
+      try {
+        await refreshProfile();
+      } catch {
+        // Silent fail — expired tokens are handled by the API interceptor
+      }
+    }, PERMISSION_REFRESH_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [user, refreshProfile]);
+
   const login = async (payload) => {
     const response = await authService.login(payload);
     localStorage.setItem(storageKeys.token, response.access_token);
     writeJSON(storageKeys.user, response.user);
     setUser(response.user);
 
-    // Fetch fresh permissions so any recent changes take effect
+    // Fetch fresh permissions so any recent role/permission changes take effect
     try {
       const freshUser = await refreshProfile();
       return freshUser;
@@ -65,6 +83,7 @@ export function AuthProvider({ children }) {
   const can = useCallback((permission) => {
     if (!user) return false;
     if (user.role === 'admin') return true;
+    if (permission === null) return false; // null = admin-only route
     return Array.isArray(user.permissions) && user.permissions.includes(permission);
   }, [user]);
 

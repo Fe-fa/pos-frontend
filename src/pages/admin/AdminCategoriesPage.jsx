@@ -5,6 +5,7 @@ import { useStore } from '../../contexts/StoreContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 
+
 const initialForm = { category_name: '' };
 const SEARCH_DEBOUNCE_MS = 300;
 

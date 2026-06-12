@@ -33,7 +33,6 @@ const DEFAULT_VAT_RATE = 16;
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
 
-/* ----------------------- helpers ----------------------- */
 const extractList = (res) => {
   if (Array.isArray(res?.data?.data)) return res.data.data;
   if (Array.isArray(res?.data)) return res.data;
@@ -226,7 +225,10 @@ const safeClearCart = (key) => {
 };
 
 export default function CashierPosPage() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
+  const canDraft         = can('pos.draft');
+  const canVoid          = can('pos.void');
+  const canPriceOverride = can('pos.price_override');
   const { stores, storeId, loading: storeLoading } = useStore();
 
   const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
@@ -1458,11 +1460,13 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
         return;
       }
 
-      if (event.key === 'F8') {
-        event.preventDefault();
-        if (!submitting && billingRef.current?.items?.length) void handleSaveOrUpdateDraft();
-        return;
-      }
+if (event.key === 'F8') {
+  event.preventDefault();
+  if (!submitting && billingRef.current?.items?.length && canDraft) {
+    void handleSaveOrUpdateDraft();
+  }
+  return;
+}
 
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -1784,37 +1788,41 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
             </div>
 
             <div className="customer-billing-section">
-              {selectedCustomerId ? (
-                <div className="selected-customer-box">
-                  <div className="customer-meta">
-                    <span className="meta-label">Customer</span>
-                    <strong>
-                      {selectedCustomer?.full_name ||
-                        (selectedCustomerId ? 'Loading...' : 'Customer')}
-                    </strong>
-                  </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button
-                      type="button"
-                      className="change-customer-btn"
-                      onClick={() => setShowCustomerModal(true)}
-                    >
-                      Change
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button view-drafts-btn"
-                      onClick={async () => {
-                        setShowDraftModal(true);
-                        await loadDrafts();
-                      }}
-                    >
-                      <FolderClock size={16} />
-                      Drafts ({drafts.length})
-                    </button>
-                  </div>
-                </div>
-              ) : (
+{selectedCustomerId ? (
+  <div className="selected-customer-box">
+    <div className="customer-meta">
+      <span className="meta-label">Customer</span>
+      <strong>
+        {selectedCustomer?.full_name ||
+          (selectedCustomerId ? 'Loading...' : 'Customer')}
+      </strong>
+    </div>
+    <div style={{ display: 'flex', gap: 6 }}>
+      <button
+        type="button"
+        className="change-customer-btn"
+        onClick={() => setShowCustomerModal(true)}
+      >
+        Change
+      </button>
+
+      {/* ← gate this one too */}
+      {canDraft && (
+        <button
+          type="button"
+          className="ghost-button view-drafts-btn"
+          onClick={async () => {
+            setShowDraftModal(true);
+            await loadDrafts();
+          }}
+        >
+          <FolderClock size={16} />
+          Drafts ({drafts.length})
+        </button>
+      )}
+    </div>
+  </div>
+    ) : (
                 <div className="selected-customer-box">
                   <div className="customer-meta">
                     <span className="meta-label">Customer</span>
@@ -1828,17 +1836,19 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
                     >
                       Select Customer
                     </button>
-                    <button
-                      type="button"
-                      className="ghost-button view-drafts-btn"
-                      onClick={async () => {
-                        setShowDraftModal(true);
-                        await loadDrafts();
-                      }}
-                    >
-                      <FolderClock size={16} />
-                      Drafts ({drafts.length})
-                    </button>
+{canDraft && (
+  <button
+    type="button"
+    className="ghost-button view-drafts-btn"
+    onClick={async () => {
+      setShowDraftModal(true);
+      await loadDrafts();
+    }}
+  >
+    <FolderClock size={16} />
+    Drafts ({drafts.length})
+  </button>
+)}
                   </div>
                 </div>
               )}
@@ -1859,16 +1869,20 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
                 className="header-action-icons-row"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
               >
-                <button
-                  type="button"
-                  className="ghost-button"
-                  disabled={!billing?.items?.length || submitting}
-                  onClick={handleSaveOrUpdateDraft}
-                  title={billing?.billing_id ? 'Update Draft' : 'Save Draft'}
-                  style={{ padding: '6px', minWidth: 'auto' }}
-                >
-                  <FolderClock size={16} />
-                </button>
+{/* Save Draft — only if user has pos.draft permission */}
+{canDraft && (
+  <button
+    type="button"
+    className="ghost-button"
+    disabled={!billing?.items?.length || submitting}
+    onClick={handleSaveOrUpdateDraft}
+    title={billing?.billing_id ? 'Update Draft' : 'Save Draft'}
+    style={{ padding: '6px', minWidth: 'auto' }}
+  >
+    <FolderClock size={16} />
+  </button>
+)}
+
                 <button
                   type="button"
                   className="ghost-button"
@@ -1889,6 +1903,20 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
                 >
                   <Download size={16} />
                 </button>
+                {/* Void sale — only if user has pos.void permission */}
+{canVoid && (
+  <button
+    type="button"
+    className="ghost-button danger"
+    disabled={!billing?.items?.length || submitting}
+    onClick={handleEscapeShortcut}
+    title="Void Sale"
+    style={{ padding: '6px', minWidth: 'auto' }}
+  >
+    Void
+  </button>
+)}
+
               </div>
             </div>
 

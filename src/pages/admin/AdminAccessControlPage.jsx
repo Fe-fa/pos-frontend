@@ -1,6 +1,7 @@
 import { Save, ShieldCheck, Users } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { accessControlService } from '../../services/accessControlService';
+import { useAuth } from '../../contexts/AuthContext';
 
 const editableRoles = ['manager', 'cashier'];
 const assignableRoles = ['admin', 'manager', 'cashier'];
@@ -24,6 +25,7 @@ function groupPermissions(permissions) {
 }
 
 export default function AdminAccessControlPage() {
+  const { refreshProfile, user } = useAuth();
   const [permissions, setPermissions] = useState([]);
   const [roles, setRoles] = useState([]);
   const [users, setUsers] = useState([]);
@@ -105,6 +107,10 @@ export default function AdminAccessControlPage() {
             : item
         )
       );
+      // ← add here — if current user's role template was updated, refresh their permissions
+if (user?.role === roleName) {
+  await refreshProfile();
+}
 
       setSuccess(`${formatTitle(roleName)} permissions updated successfully.`);
     } catch (err) {
@@ -132,6 +138,10 @@ export default function AdminAccessControlPage() {
           user.user_id === userId ? { ...user, role: roleName } : user
         )
       );
+      // ← add here — if current logged-in user's role was changed, refresh immediately
+if (user?.user_id === userId) {
+  await refreshProfile();
+}
 
       setSuccess('User role updated successfully.');
     } catch (err) {

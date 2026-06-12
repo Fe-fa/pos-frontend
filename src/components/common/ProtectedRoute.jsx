@@ -10,7 +10,8 @@ function hasRole(user, allowedRoles) {
 export default function ProtectedRoute({
   allowedRoles = [],
   requireStoreAssignment = false,
-  requirePermission = null,   // ← e.g. requirePermission="categories.manage"
+  requirePermission = null,
+  children = null,
 }) {
   const { user, loading, isAuthenticated, can } = useAuth();
   const location = useLocation();
@@ -19,11 +20,12 @@ export default function ProtectedRoute({
     return <div className="page-loader">Loading workspace...</div>;
   }
 
+  // Not authenticated → always go to login, never home
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  // Cashiers only — never block admin/manager for missing store
+  // Cashier without store → pending approval
   if (
     user?.role === 'cashier' &&
     !userHasStoreAssignment(user) &&
@@ -32,19 +34,20 @@ export default function ProtectedRoute({
     return <Navigate to="/pending-approval" replace />;
   }
 
-  // Admin bypasses store assignment gate entirely
   if (requireStoreAssignment && user?.role !== 'admin' && !userHasStoreAssignment(user)) {
     return <Navigate to="/pending-approval" replace />;
   }
 
-  if (!hasRole(user, allowedRoles)) {
+  // Wrong role → login (security: don't reveal home path)
+  if (allowedRoles.length && !hasRole(user, allowedRoles)) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
+  // No permission → redirect to their home, not login
+  // They ARE authenticated, just don't have access to this specific page
+  if (requirePermission && user?.role !== 'admin' && !can(requirePermission)) {
     return <Navigate to={getUserHomePath(user)} replace />;
   }
 
-  // Permission gate — redirect home if user lacks the required permission
-  if (requirePermission && !can(requirePermission)) {
-    return <Navigate to={getUserHomePath(user)} replace />;
-  }
-
-  return <Outlet />;
+  return children ?? <Outlet />;
 }

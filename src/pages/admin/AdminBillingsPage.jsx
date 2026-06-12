@@ -6,6 +6,7 @@ import { currency, formatDateTime } from '../../utils/helpers';
 import { mergeStoreSettings } from '../../utils/storeSettings';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
+import { useAuth } from '../../contexts/AuthContext';
 
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
 
