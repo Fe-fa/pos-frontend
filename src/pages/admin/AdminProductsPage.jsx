@@ -5,6 +5,7 @@ import { productService } from '../../services/productService';
 import { currency } from '../../utils/helpers';
 import { useStore } from '../../contexts/StoreContext';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
+import { useAuth } from '../../contexts/AuthContext';
 
 const IMAGE_BASE_URL =
   import.meta.env.VITE_STORAGE_URL ||
@@ -39,6 +40,8 @@ const formatApiError = (err) => {
 };
 
 export default function AdminProductsPage() {
+    const { can } = useAuth();
+  const canManage = can('products.manage'); 
   const { stores, storeId } = useStore();
   const currentStore = stores.find(
     (store) => String(store.store_id) === String(storeId)

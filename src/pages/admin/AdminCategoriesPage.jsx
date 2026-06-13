@@ -13,8 +13,7 @@ export default function AdminCategoriesPage() {
   const { storeId } = useStore();
   const { can } = useAuth();
 
-  const canManage = can('categories.manage'); // ← true for admin, true for manager with permission
-
+  const canManage = can('categories.manage'); 
   const [categories, setCategories] = useState([]);
   const [meta, setMeta] = useState({ ...EMPTY_META });
   const [page, setPage] = useState(1);

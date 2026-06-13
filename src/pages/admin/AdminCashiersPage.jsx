@@ -10,6 +10,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { userService } from '../../services/userService';
 
+
 const emptyState = {
   loading: true,
   error: '',
@@ -173,7 +174,9 @@ function SummaryCard({ icon: Icon, label, value }) {
 }
 
 export default function AdminCashiersPage() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
+  const canManage = can('cashiers.manage'); 
+
   const { stores = [], activeStore, storeId } = useStore();
 
   const [rows, setRows] = useState([]);

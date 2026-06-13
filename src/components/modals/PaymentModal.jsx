@@ -51,6 +51,12 @@ export default function PaymentModal({
   onPaymentMethodChange,
   onClose,
   onCharge,
+  loyaltyPoints = 0,
+  loyaltyPointValue = 1,
+  pointsToRedeem,
+  setPointsToRedeem,
+  chapa5 = null,          // ← add
+  loyaltyDiscount,
 }) {
   if (!isOpen) return null;
 
@@ -116,7 +122,127 @@ export default function PaymentModal({
                 <strong>{selectedCustomer?.full_name || 'Selected'}</strong>
               </div>
             ) : null}
+                        {loyaltyPoints > 0 ? (
+              <div className="payment-summary-pill" style={{ borderColor: 'var(--color-border-success)' }}>
+                <span>Loyalty points</span>
+                <strong style={{ color: 'var(--color-text-success)' }}>
+                  {loyaltyPoints} pts
+                </strong>
+              </div>
+            ) : null}
           </div>
+          {/* Chapa 5 punch card banner */}
+          {chapa5?.enabled && selectedCustomer ? (
+            <div style={{
+              padding: '10px 14px',
+              borderRadius: 8,
+              background: chapa5.punches_needed === 0
+                ? 'var(--color-background-success)'
+                : 'var(--color-background-info)',
+              border: `1px solid ${chapa5.punches_needed === 0
+                ? 'var(--color-border-success)'
+                : 'var(--color-border-info)'}`,
+              marginBottom: 12,
+            }}>
+              {chapa5.punches_needed === 0 ? (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <strong style={{ color: 'var(--color-text-success)' }}>
+                      🎉 {chapa5.label} Reward Ready!
+                    </strong>
+                    <p style={{ margin: '2px 0 0', fontSize: 13, color: 'var(--color-text-success)' }}>
+                      Customer gets {chapa5.free_count} free item(s) — apply discount manually
+                    </p>
+                  </div>
+                  <span className="status-badge paid" style={{ fontSize: 13 }}>
+                    {chapa5.free_count} FREE
+                  </span>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <strong style={{ fontSize: 13 }}>
+                      🥊 {chapa5.label}
+                    </strong>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {chapa5.progress} / {chapa5.buy_count} punches
+                    </span>
+                  </div>
+                  <div style={{
+                    height: 8,
+                    background: 'var(--color-border-tertiary)',
+                    borderRadius: 4,
+                    overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%',
+                      width: `${(chapa5.progress / chapa5.buy_count) * 100}%`,
+                      background: 'var(--color-text-info)',
+                      borderRadius: 4,
+                      transition: 'width 0.3s ease',
+                    }} />
+                  </div>
+                  <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                    {chapa5.punches_needed} more purchase(s) to earn {chapa5.free_count} free item
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : null}
+                    {/* ✅ ADD HERE — loyalty redemption block */}
+          {loyaltyPoints > 0 && selectedCustomer ? (
+            <div className="payment-fields-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <strong>Redeem loyalty points</strong>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {loyaltyPoints} available · {currency(loyaltyPoints * loyaltyPointValue, currentStore?.currency)} value
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  className="text-input"
+                  type="number"
+                  min="0"
+                  max={loyaltyPoints}
+                  value={pointsToRedeem || ''}
+                  onChange={(e) => setPointsToRedeem(Number(e.target.value))}
+                  placeholder="Points to redeem"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    const maxPoints = Math.min(
+                      loyaltyPoints,
+                      Math.floor(invoiceAmount / loyaltyPointValue)
+                    );
+                    setPointsToRedeem(maxPoints);
+                  }}
+                >
+                  Redeem max
+                </button>
+                {pointsToRedeem > 0 ? (
+                  <button
+                    type="button"
+                    className="ghost-button danger"
+                    onClick={() => setPointsToRedeem(0)}
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              {pointsToRedeem > 0 ? (
+                <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+                  Discount: <strong>{currency(pointsToRedeem * loyaltyPointValue, currentStore?.currency)}</strong>
+                  {' · '}
+                  Remaining due: <strong>
+                    {currency(Math.max(invoiceAmount - (pointsToRedeem * loyaltyPointValue), 0), currentStore?.currency)}
+                  </strong>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="payment-method-card-grid">
             {PAYMENT_METHODS.map((method) => {

@@ -2,7 +2,8 @@ import { X, Edit, Trash2, ChevronDown } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { customerService } from '../../services/customerService';
 import { currency } from '../../utils/helpers';
-import { useStore } from '../../contexts/StoreContext';
+import { useStore } from '../../contexts/StoreContext'
+import { useAuth } from '../../contexts/AuthContext';
 
 const initialForm = { full_name: '', email: '', phone: '', current_balance: 0 };
 
@@ -38,6 +39,8 @@ const extractPagination = (response) => {
 };
 
 export default function AdminCustomersPage() {
+    const { can } = useAuth();
+    const canManage = can('customers.manage'); 
   const { stores, storeId } = useStore();
   const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
 
@@ -250,6 +253,7 @@ export default function AdminCustomersPage() {
                   <th>Name</th>
                   <th>Contacts</th>
                   <th>Balance</th>
+                  <th>Loyalty Points</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -271,6 +275,12 @@ export default function AdminCustomersPage() {
                         <div className="muted">{customer.email || '-'}</div>
                       </td>
                       <td>{currency(customer.current_balance, currentStore?.currency)}</td>
+                      <td>
+  <div>{customer.loyalty_points ?? 0} pts</div>
+  <div className="muted" style={{ fontSize: 12 }}>
+    {currency(customer.loyalty_points ?? 0, currentStore?.currency)} value
+  </div>
+</td>
                       <td>
 <div className="row-actions compact">
   {/* Edit Customer Button */}

@@ -4,6 +4,7 @@ import { inventoryService } from '../../services/inventoryService';
 import { productService } from '../../services/productService';
 import { useStore } from '../../contexts/StoreContext';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
+import { useAuth } from '../../contexts/AuthContext';
 
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
 
@@ -58,6 +59,8 @@ const formatSignedQty = (value) => {
 };
 
 export default function AdminInventoryPage() {
+  const { can } = useAuth();
+  const canManage = can('inventory.manage'); 
   const { storeId } = useStore();
 
   const [rows, setRows] = useState([]);

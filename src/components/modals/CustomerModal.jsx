@@ -234,10 +234,25 @@ export default function CustomerModal({
                       {customer?.phone ? <p>{customer.phone}</p> : null}
                       {customer?.email ? <small>{customer.email}</small> : null}
                     </div>
-
-                    <div className="align-right draft-side-meta">
+<div className="align-right draft-side-meta">
                       <strong>{currency(balance, currentStore?.currency)}</strong>
-                      <p>Current balance</p>
+                      <p>Balance</p>
+                      {customer?.loyalty_points > 0 ? (
+                        <>
+                          <strong style={{ color: 'var(--color-text-success)' }}>
+                            {customer.loyalty_points} pts
+                          </strong>
+                          <p>Loyalty points</p>
+                        </>
+                      ) : null}
+                      {customer?.punch_card_count > 0 ? (
+                        <>
+                          <strong style={{ color: 'var(--color-text-info)', marginTop: 4 }}>
+                            🥊 {customer.punch_card_count} punches
+                          </strong>
+                          <p>Punch card</p>
+                        </>
+                      ) : null}
                     </div>
                   </button>
                 </div>

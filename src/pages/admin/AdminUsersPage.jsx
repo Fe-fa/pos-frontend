@@ -46,7 +46,8 @@ function formatShift(user) {
 }
 
 export default function AdminUsersPage() {
-  const { user } = useAuth();
+    const { user, can } = useAuth();
+  const canManage = can('users.manage') || can('users.assign');   
   const { stores, activeStore } = useStore();
 
   const [rows, setRows] = useState([]);

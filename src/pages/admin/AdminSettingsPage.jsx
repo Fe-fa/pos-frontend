@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { storeService } from '../../services/storeService';
+import { rewardService } from '../../services/rewardService';     // ← ADD
 import { mergeStoreSettings } from '../../utils/storeSettings';
 
 const PRINT_OPTIONS = [
@@ -33,16 +34,18 @@ export default function AdminSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(false);
 
+  const [activeRuleId, setActiveRuleId] = useState(null);         // ← ADD
+
   const isAdmin = user?.role === 'admin';
 
   useEffect(() => {
     document.documentElement.classList.toggle('spacious-ui', !!form.spacious_layout);
-
     return () => {
       document.documentElement.classList.remove('spacious-ui');
     };
   }, [form.spacious_layout]);
 
+  // Load store settings
   useEffect(() => {
     if (!currentStore?.store_id) {
       setForm(mergeStoreSettings());
@@ -61,28 +64,48 @@ export default function AdminSettingsPage() {
       try {
         const response = await storeService.getSettings(currentStore.store_id);
         const payload = extractApiData(response);
-
         if (!isMounted) return;
-
         setForm(mergeStoreSettings(payload));
       } catch (err) {
         if (!isMounted) return;
-
         setForm(mergeStoreSettings(currentStore));
         setError(err?.response?.data?.message || 'Unable to load store settings.');
       } finally {
-        if (isMounted) {
-          setLoadingSettings(false);
-        }
+        if (isMounted) setLoadingSettings(false);
       }
     };
 
     loadSettings();
-
-    return () => {
-      isMounted = false;
-    };
+    return () => { isMounted = false; };
   }, [currentStore]);
+
+  // ── Load active reward rule and populate Loyalty & Rewards fields ────── ← ADD
+  useEffect(() => {
+    if (!currentStore?.store_id) return;
+
+    rewardService.list({ store_id: currentStore.store_id })
+      .then(res => {
+        // rewardService.list does r => r.data, so res = { data: [...] } or [...]
+        const rules = Array.isArray(res?.data) ? res.data
+                    : Array.isArray(res)        ? res
+                    : [];
+
+        const active = rules[0] ?? null;
+        if (!active) return;
+
+        setActiveRuleId(active.id ?? active.reward_rule_id ?? null);
+
+        setForm(prev => ({
+          ...prev,
+          chapa5_enabled:   active.chapa5_enabled   ?? false,
+          chapa5_buy_count: active.chapa5_buy_count ?? 5,
+          chapa5_free_count:active.chapa5_free_count ?? 1,
+          chapa5_label:     active.chapa5_label     ?? 'Chapa 5',
+        }));
+      })
+      .catch(() => {});
+  }, [currentStore?.store_id]);
+  // ────────────────────────────────────────────────────────────────────────
 
   const updateField = (key, value) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -105,8 +128,6 @@ export default function AdminSettingsPage() {
     setError('');
   };
 
-  
-
   const handleSubmit = async (event) => {
     event.preventDefault();
 
@@ -122,6 +143,7 @@ export default function AdminSettingsPage() {
     try {
       const { document_sequences, ...settingsPayload } = form;
 
+      // 1. Save store settings as before
       const response = await storeService.updateSettings(currentStore.store_id, {
         settings: settingsPayload,
         document_sequences,
@@ -129,6 +151,17 @@ export default function AdminSettingsPage() {
 
       const payload = extractApiData(response);
       setForm(mergeStoreSettings(payload));
+
+      // 2. Save Chapa 5 fields back to the reward rule ← ADD
+      if (activeRuleId) {
+        await rewardService.update(activeRuleId, {
+          chapa5_enabled:    form.chapa5_enabled   ?? false,
+          chapa5_buy_count:  form.chapa5_buy_count  ?? 5,
+          chapa5_free_count: form.chapa5_free_count ?? 1,
+          chapa5_label:      form.chapa5_label      ?? 'Chapa 5',
+        });
+      }
+
       setMessage('Store settings and document numbering saved successfully.');
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to save store settings.');
@@ -339,6 +372,92 @@ export default function AdminSettingsPage() {
             <section className="settings-section span-2">
               <div className="settings-section__header">
                 <div>
+                  <h4>Loyalty &amp; Rewards</h4>
+                  <p>Configure points earning rate and Chapa 5 punch card promotion.</p>
+                </div>
+              </div>
+
+              <div className="settings-toggle-grid" style={{ marginBottom: 16 }}>
+                <label className="settings-toggle-card">
+                  <input
+                    type="checkbox"
+                    checked={!!form.loyalty_enabled}
+                    onChange={(e) => updateField('loyalty_enabled', e.target.checked)}
+                    disabled={loadingSettings || saving}
+                  />
+                  <span>Enable loyalty points system</span>
+                </label>
+
+                <label className="settings-toggle-card">
+                  <input
+                    type="checkbox"
+                    checked={!!form.chapa5_enabled}
+                    onChange={(e) => updateField('chapa5_enabled', e.target.checked)}
+                    disabled={loadingSettings || saving}
+                  />
+                  <span>Enable Chapa 5 punch card promotion</span>
+                </label>
+              </div>
+
+              {form.chapa5_enabled ? (
+                <div className="settings-input-grid">
+                  <label>
+                    Promotion label
+                    <input
+                      className="text-input"
+                      value={form.chapa5_label || 'Chapa 5'}
+                      onChange={(e) => updateField('chapa5_label', e.target.value)}
+                      placeholder="e.g. Chapa 5"
+                      disabled={loadingSettings || saving}
+                    />
+                  </label>
+
+                  <label>
+                    Buy count (e.g. buy 5)
+                    <input
+                      className="text-input"
+                      type="number"
+                      min="1"
+                      value={form.chapa5_buy_count || 5}
+                      onChange={(e) => updateField('chapa5_buy_count', Number(e.target.value))}
+                      disabled={loadingSettings || saving}
+                    />
+                  </label>
+
+                  <label>
+                    Free count (e.g. get 1 free)
+                    <input
+                      className="text-input"
+                      type="number"
+                      min="1"
+                      value={form.chapa5_free_count || 1}
+                      onChange={(e) => updateField('chapa5_free_count', Number(e.target.value))}
+                      disabled={loadingSettings || saving}
+                    />
+                  </label>
+
+                  <div className="info-tile compact">
+                    <span className="muted">Preview</span>
+                    <strong>
+                      Buy {form.chapa5_buy_count || 5} items, get {form.chapa5_free_count || 1} free
+                      — &quot;{form.chapa5_label || 'Chapa 5'}&quot;
+                    </strong>
+                  </div>
+
+                  {/* Warn if no rule exists yet to save into */}
+                  {!activeRuleId ? (
+                    <p className="form-error span-2" style={{ marginTop: 8 }}>
+                      No active reward rule found for this store. Create one first so these
+                      settings have somewhere to save.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+
+            <section className="settings-section span-2">
+              <div className="settings-section__header">
+                <div>
                   <h4>Document numbering</h4>
                   <p>Manage invoice and receipt sequence prefixes, suffixes and counters per store.</p>
                 </div>
@@ -445,7 +564,7 @@ export default function AdminSettingsPage() {
               </div>
             </section>
 
-            {error ? <p className="form-error span-2">{error}</p> : null}
+            {error   ? <p className="form-error span-2">{error}</p>     : null}
             {message ? <p className="form-success span-2">{message}</p> : null}
 
             <div className="row-actions span-2 admin-settings-actions">
@@ -453,7 +572,11 @@ export default function AdminSettingsPage() {
                 {loadingSettings ? 'Loading settings...' : 'Store ready'}
               </button>
 
-              <button className="primary-button admin-save-button" type="submit" disabled={saving || loadingSettings}>
+              <button
+                className="primary-button admin-save-button"
+                type="submit"
+                disabled={saving || loadingSettings}
+              >
                 {saving ? 'Saving...' : 'Save settings'}
               </button>
             </div>

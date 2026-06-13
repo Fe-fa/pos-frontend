@@ -24,6 +24,7 @@ import PaymentModal from '../../components/modals/PaymentModal';
 import DraftModal from '../../components/modals/DraftModal';
 import CustomerModal from '../../components/modals/CustomerModal';
 import ProductCard from '../../components/card/ProductCard';
+import { rewardService } from '../../services/rewardService';
 
 const SEARCH_DEBOUNCE_MS = 300;
 const PRODUCT_CACHE_TTL_MS = 60_000;
@@ -226,8 +227,8 @@ const safeClearCart = (key) => {
 
 export default function CashierPosPage() {
   const { user, can } = useAuth();
-  const canDraft         = can('pos.draft');
-  const canVoid          = can('pos.void');
+  const canDraft = can('pos.draft');
+  const canVoid = can('pos.void');
   const canPriceOverride = can('pos.price_override');
   const { stores, storeId, loading: storeLoading } = useStore();
 
@@ -293,6 +294,10 @@ export default function CashierPosPage() {
   const [mpesaCode, setMpesaCode] = useState('');
   const [cardReference, setCardReference] = useState('');
   const [cardHolder, setCardHolder] = useState('');
+
+  const [pointsToRedeem, setPointsToRedeem] = useState(0);
+  const [loyaltyRule, setLoyaltyRule] = useState(null);
+  const chapa5 = loyaltyRule?.chapa5 ?? null;
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
@@ -794,6 +799,22 @@ export default function CashierPosPage() {
       cancelled = true;
     };
   }, [selectedCustomerId, selectedCustomer]);
+
+useEffect(() => {
+  if (!selectedCustomerId || !storeId) {
+    setLoyaltyRule(null);
+    return;
+  }
+
+rewardService.customerLoyalty({
+  store_id:    Number(storeId),
+  customer_id: Number(selectedCustomerId),
+}).then(res => {
+  setLoyaltyRule(res.data);  // ← res = { data: { loyalty_points, chapa5, active_rule, ... } }
+}).catch(() => {
+  setLoyaltyRule(null);
+});
+}, [selectedCustomerId, storeId]);
 
   /* =====================================================================
      EFFECTS
@@ -1323,6 +1344,7 @@ export default function CashierPosPage() {
           paymentMethod === 'cash'
             ? Number(amountTendered || amountReceived || 0)
             : Number(amountReceived || 0),
+        points_redeemed: pointsToRedeem || 0,
         mpesa_phone: paymentMethod === 'mpesa' ? mpesaPhone : null,
         mpesa_code: paymentMethod === 'mpesa' ? mpesaCode : null,
         card_reference: paymentMethod === 'card' ? cardReference : null,
@@ -1337,6 +1359,7 @@ export default function CashierPosPage() {
 
       removeDraftPreview(target.billing_id);
       resetSale();
+      setPointsToRedeem(0);
       setShowPaymentModal(false);
       setSuccess('Payment processed successfully.');
       focusSearchInput(true);
@@ -1383,15 +1406,15 @@ export default function CashierPosPage() {
     }
   };
 
-const handleCustomerSelect = useCallback((customerId, customerObject = null) => {
-  setSelectedCustomerId(customerId);
-  if (customerObject) {
-    setSelectedCustomer(customerObject); // ← set instantly, no fetch needed
-  } else {
-    setSelectedCustomer(null); // ← walk-in customer
-  }
-  setShowCustomerModal(false);
-}, []);
+  const handleCustomerSelect = useCallback((customerId, customerObject = null) => {
+    setSelectedCustomerId(customerId);
+    if (customerObject) {
+      setSelectedCustomer(customerObject); // ← set instantly, no fetch needed
+    } else {
+      setSelectedCustomer(null); // ← walk-in customer
+    }
+    setShowCustomerModal(false);
+  }, []);
 
   const handleEscapeShortcut = useCallback(async () => {
     if (submitting) return;
@@ -1460,13 +1483,13 @@ const handleCustomerSelect = useCallback((customerId, customerObject = null) => 
         return;
       }
 
-if (event.key === 'F8') {
-  event.preventDefault();
-  if (!submitting && billingRef.current?.items?.length && canDraft) {
-    void handleSaveOrUpdateDraft();
-  }
-  return;
-}
+      if (event.key === 'F8') {
+        event.preventDefault();
+        if (!submitting && billingRef.current?.items?.length && canDraft) {
+          void handleSaveOrUpdateDraft();
+        }
+        return;
+      }
 
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -1788,41 +1811,41 @@ if (event.key === 'F8') {
             </div>
 
             <div className="customer-billing-section">
-{selectedCustomerId ? (
-  <div className="selected-customer-box">
-    <div className="customer-meta">
-      <span className="meta-label">Customer</span>
-      <strong>
-        {selectedCustomer?.full_name ||
-          (selectedCustomerId ? 'Loading...' : 'Customer')}
-      </strong>
-    </div>
-    <div style={{ display: 'flex', gap: 6 }}>
-      <button
-        type="button"
-        className="change-customer-btn"
-        onClick={() => setShowCustomerModal(true)}
-      >
-        Change
-      </button>
+              {selectedCustomerId ? (
+                <div className="selected-customer-box">
+                  <div className="customer-meta">
+                    <span className="meta-label">Customer</span>
+                    <strong>
+                      {selectedCustomer?.full_name ||
+                        (selectedCustomerId ? 'Loading...' : 'Customer')}
+                    </strong>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className="change-customer-btn"
+                      onClick={() => setShowCustomerModal(true)}
+                    >
+                      Change
+                    </button>
 
-      {/* ← gate this one too */}
-      {canDraft && (
-        <button
-          type="button"
-          className="ghost-button view-drafts-btn"
-          onClick={async () => {
-            setShowDraftModal(true);
-            await loadDrafts();
-          }}
-        >
-          <FolderClock size={16} />
-          Drafts ({drafts.length})
-        </button>
-      )}
-    </div>
-  </div>
-    ) : (
+                    {/* ← gate this one too */}
+                    {canDraft && (
+                      <button
+                        type="button"
+                        className="ghost-button view-drafts-btn"
+                        onClick={async () => {
+                          setShowDraftModal(true);
+                          await loadDrafts();
+                        }}
+                      >
+                        <FolderClock size={16} />
+                        Drafts ({drafts.length})
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
                 <div className="selected-customer-box">
                   <div className="customer-meta">
                     <span className="meta-label">Customer</span>
@@ -1836,19 +1859,19 @@ if (event.key === 'F8') {
                     >
                       Select Customer
                     </button>
-{canDraft && (
-  <button
-    type="button"
-    className="ghost-button view-drafts-btn"
-    onClick={async () => {
-      setShowDraftModal(true);
-      await loadDrafts();
-    }}
-  >
-    <FolderClock size={16} />
-    Drafts ({drafts.length})
-  </button>
-)}
+                    {canDraft && (
+                      <button
+                        type="button"
+                        className="ghost-button view-drafts-btn"
+                        onClick={async () => {
+                          setShowDraftModal(true);
+                          await loadDrafts();
+                        }}
+                      >
+                        <FolderClock size={16} />
+                        Drafts ({drafts.length})
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1869,19 +1892,19 @@ if (event.key === 'F8') {
                 className="header-action-icons-row"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
               >
-{/* Save Draft — only if user has pos.draft permission */}
-{canDraft && (
-  <button
-    type="button"
-    className="ghost-button"
-    disabled={!billing?.items?.length || submitting}
-    onClick={handleSaveOrUpdateDraft}
-    title={billing?.billing_id ? 'Update Draft' : 'Save Draft'}
-    style={{ padding: '6px', minWidth: 'auto' }}
-  >
-    <FolderClock size={16} />
-  </button>
-)}
+                {/* Save Draft — only if user has pos.draft permission */}
+                {canDraft && (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!billing?.items?.length || submitting}
+                    onClick={handleSaveOrUpdateDraft}
+                    title={billing?.billing_id ? 'Update Draft' : 'Save Draft'}
+                    style={{ padding: '6px', minWidth: 'auto' }}
+                  >
+                    <FolderClock size={16} />
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -1904,18 +1927,18 @@ if (event.key === 'F8') {
                   <Download size={16} />
                 </button>
                 {/* Void sale — only if user has pos.void permission */}
-{canVoid && (
-  <button
-    type="button"
-    className="ghost-button danger"
-    disabled={!billing?.items?.length || submitting}
-    onClick={handleEscapeShortcut}
-    title="Void Sale"
-    style={{ padding: '6px', minWidth: 'auto' }}
-  >
-    Void
-  </button>
-)}
+                {canVoid && (
+                  <button
+                    type="button"
+                    className="ghost-button danger"
+                    disabled={!billing?.items?.length || submitting}
+                    onClick={handleEscapeShortcut}
+                    title="Void Sale"
+                    style={{ padding: '6px', minWidth: 'auto' }}
+                  >
+                    Void
+                  </button>
+                )}
 
               </div>
             </div>
@@ -2032,6 +2055,12 @@ if (event.key === 'F8') {
         onPaymentMethodChange={handlePaymentMethodChange}
         onClose={() => setShowPaymentModal(false)}
         onCharge={handleCharge}
+      
+  loyaltyPoints={loyaltyRule?.loyalty_points ?? 0}
+  loyaltyPointValue={loyaltyRule?.active_rule?.point_value ?? 1}
+  pointsToRedeem={pointsToRedeem}
+  setPointsToRedeem={setPointsToRedeem}
+  chapa5={loyaltyRule?.chapa5 ?? null}
       />
 
       <DraftModal

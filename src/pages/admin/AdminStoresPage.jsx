@@ -69,7 +69,8 @@ function SummaryCard({ icon: Icon, label, value, caption }) {
 }
 
 export default function AdminStoresPage() {
-  const { user } = useAuth();
+    const { can } = useAuth();
+  const canManage = can('stores.manage'); 
   const [stores, setStores] = useState([]);
   const [pagination, setPagination] = useState(emptyPagination);
   const [page, setPage] = useState(1);
