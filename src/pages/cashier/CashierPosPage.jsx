@@ -149,9 +149,13 @@ const recalcBillingTotals = (billing) => {
   };
 };
 
-const buildLocalItem = (product, quantity = 1) => {
-  const unitPrice = Number(product.price || 0);
-  const vatRate = Number(product.vat_rate ?? DEFAULT_VAT_RATE);
+const buildLocalItem = (product, quantity = 1, overrides = {}) => {
+  const unitPrice = Number(
+    (overrides.unit_price ?? overrides.unitPrice ?? product.price) || 0
+  );
+  const vatRate = Number(
+    overrides.vat_rate ?? overrides.vatRate ?? product.vat_rate ?? DEFAULT_VAT_RATE
+  );
   const totals = calcLineFromGross(quantity, unitPrice, vatRate);
 
   return {
@@ -171,8 +175,10 @@ const buildLocalItem = (product, quantity = 1) => {
     vat_rate: vatRate,
     ...totals,
     __local: true,
+    ...overrides,
   };
 };
+
 
 const buildEmptyLocalBilling = () => ({
   billing_id: null,
@@ -297,7 +303,72 @@ export default function CashierPosPage() {
 
   const [pointsToRedeem, setPointsToRedeem] = useState(0);
   const [loyaltyRule, setLoyaltyRule] = useState(null);
+  const [chapa5ClaimedQty, setChapa5ClaimedQty] = useState(0);
   const chapa5 = loyaltyRule?.chapa5 ?? null;
+  
+
+const chapa5Preview = useMemo(() => {
+  if (!chapa5?.enabled || !billing?.items?.length) return null;
+
+  const currentPunches = Number(chapa5.current_punches ?? chapa5.progress ?? 0);
+  const buyCount = Number(chapa5.buy_count ?? 5);
+  const freeCount = Number(chapa5.free_count ?? 1);
+
+  // ← Only count PAID items (unit_price > 0), exclude free reward lines
+  const qualifyingQty = billing.items.reduce((sum, it) => {
+    const sku = it.product?.sku || '';
+    const unitPrice = Number(it.unit_price ?? 0);
+    if (chapa5.product_sku && sku !== chapa5.product_sku) return sum;
+    if (unitPrice <= 0) return sum; // ← exclude free/zero-price lines
+    return sum + Number(it.quantity || 0);
+  }, 0);
+
+  const progressAfter = currentPunches + qualifyingQty;
+
+  const previousCycles = Math.floor(currentPunches / buyCount);
+  const newCycles = Math.floor(progressAfter / buyCount);
+  const cyclesCompleted = Math.max(newCycles - previousCycles, 0);
+  const freeItems = cyclesCompleted * freeCount;
+  const unclaimedFreeItems = Math.max(freeItems - chapa5ClaimedQty, 0);
+
+  const displayProgress = progressAfter % buyCount;
+
+  return {
+    enabled: true,
+    label: chapa5.label || `Buy ${buyCount} Get ${freeCount} Free`,
+    product_sku: chapa5.product_sku || null,
+    buy_count: buyCount,
+    free_count: freeCount,
+    current_punches: currentPunches,
+    qualifying_qty: qualifyingQty,
+    progress_after: progressAfter,
+    display_progress: displayProgress,
+    qualifies: freeItems > 0,
+    free_items: freeItems,
+    claimable_free_items: unclaimedFreeItems,
+    already_claimed: chapa5ClaimedQty,
+  };
+}, [chapa5, billing?.items, chapa5ClaimedQty]);
+
+// Auto-adjust free item line when customer reduces mandazi
+useEffect(() => {
+  if (!chapa5Preview) return;
+  const maxFree = chapa5Preview.free_items;
+  if (chapa5ClaimedQty <= maxFree) return;
+
+  const excessFree = chapa5ClaimedQty - maxFree;
+  setChapa5ClaimedQty(maxFree);
+
+  const freeItem = billingRef.current?.items?.find(
+    (it) => Number(it.unit_price) <= 0 &&
+      it.product?.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+  );
+  if (!freeItem) return;
+
+  const newQty = Number(freeItem.quantity) - excessFree;
+  updateItemQuantity(freeItem, newQty);
+}, [chapa5Preview?.free_items]);
+
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
@@ -314,6 +385,7 @@ export default function CashierPosPage() {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [paymentError, setPaymentError] = useState('');
 
   const visibleCategories = categories;
 
@@ -454,6 +526,7 @@ export default function CashierPosPage() {
     setSelectedCustomerId('');
     setSelectedCustomer(null);
     setNotes('');
+    setChapa5ClaimedQty(0);  // ← was setChapa5Claimed(false)
     resetPaymentState('');
     setShowPaymentModal(false);
     setShowCustomerModal(false);
@@ -806,15 +879,19 @@ useEffect(() => {
     return;
   }
 
-rewardService.customerLoyalty({
-  store_id:    Number(storeId),
-  customer_id: Number(selectedCustomerId),
-}).then(res => {
-  setLoyaltyRule(res.data);  // ← res = { data: { loyalty_points, chapa5, active_rule, ... } }
-}).catch(() => {
-  setLoyaltyRule(null);
-});
+  rewardService
+    .customerLoyalty({
+      store_id: Number(storeId),
+      customer_id: Number(selectedCustomerId),
+    })
+    .then((data) => {
+      setLoyaltyRule(data || null);
+    })
+    .catch(() => {
+      setLoyaltyRule(null);
+    });
 }, [selectedCustomerId, storeId]);
+
 
   /* =====================================================================
      EFFECTS
@@ -1093,6 +1170,21 @@ rewardService.customerLoyalty({
     [applyBillingMutation, enqueueSync]
   );
 
+  const handleAddProductAsync = useCallback(
+  (product, overrides = {}) => {
+    return new Promise((resolve) => {
+      if (!product?.product_id) return resolve();
+      applyBillingMutation((draft) => {
+        const local = buildLocalItem(product, 1, overrides);
+        draft.items.push(local);
+        return draft;
+      });
+      resolve();
+    });
+  },
+  [applyBillingMutation]
+);
+
   const removeItem = useCallback(
     (billingItemId) => {
       if (!billingItemId) return;
@@ -1228,11 +1320,28 @@ rewardService.customerLoyalty({
     mergeDraftPreview(updatedBilling);
     return updatedBilling;
   };
+// REPLACE the existing openPaymentModalForBilling with this:
+const openPaymentModalForBilling = (billingData) => {
+  const outstandingBalance = Number(
+    selectedCustomer?.current_balance ??
+    selectedCustomer?.balance ??
+    selectedCustomer?.opening_balance ??
+    0
+  );
 
-  const openPaymentModalForBilling = (billingData) => {
-    resetPaymentState(billingData?.total || '');
-    setShowPaymentModal(true);
-  };
+  const invoiceTotal = Number(billingData?.total || 0);
+  const loyaltyPointValue = loyaltyRule?.active_rule?.point_value ?? 1;
+  const loyaltyDiscount = Math.max(
+    0,
+    Math.min(invoiceTotal, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
+  );
+  const discountedTotal = Math.max(invoiceTotal - loyaltyDiscount, 0);
+  const payableNow = discountedTotal + outstandingBalance;
+
+  resetPaymentState(payableNow ? String(payableNow) : '');
+  setShowPaymentModal(true);
+};
+
 
   const handleSaveOrUpdateDraft = async () => {
     const current = billingRef.current;
@@ -1291,84 +1400,87 @@ rewardService.customerLoyalty({
     if (method !== 'cash') setAmountTendered('');
   };
 
-  const validatePayment = () => {
-    if (!paymentMethod) {
-      setError('Please select a payment method.');
+const validatePayment = () => {
+  if (!paymentMethod) {
+    setPaymentError('Please select a payment method.');
+    return false;
+  }
+  if (!amountReceived || Number(amountReceived) <= 0) {
+    setPaymentError('Please enter a valid amount received.');
+    return false;
+  }
+  if (paymentMethod === 'cash' && (!amountTendered || Number(amountTendered) <= 0)) {
+    setPaymentError('Please enter the cash received amount.');
+    return false;
+  }
+  if (paymentMethod === 'mpesa') {
+    if (!mpesaPhone.trim()) {
+      setPaymentError('Please enter MPESA phone number.');
       return false;
     }
-    if (!amountReceived || Number(amountReceived) <= 0) {
-      setError('Please enter a valid amount received.');
+    if (!mpesaCode.trim()) {
+      setPaymentError('Please enter MPESA transaction code.');
       return false;
     }
-    if (paymentMethod === 'mpesa') {
-      if (!mpesaPhone.trim()) {
-        setError('Please enter MPESA phone number.');
-        return false;
-      }
-      if (!mpesaCode.trim()) {
-        setError('Please enter MPESA transaction code.');
-        return false;
-      }
-    }
-    if (paymentMethod === 'card' && !cardReference.trim()) {
-      setError('Please enter card reference.');
-      return false;
-    }
-    return true;
-  };
+  }
+  if (paymentMethod === 'card' && !cardReference.trim()) {
+    setPaymentError('Please enter card reference.');
+    return false;
+  }
+  return true;
+};
 
-  const handleCharge = async () => {
-    const current = billingRef.current;
-    if (!current?.items?.length) return;
-    if (!validatePayment()) return;
+const handleCharge = async () => {
+  const current = billingRef.current;
+  if (!current?.items?.length) return;
+  setPaymentError('');
+  if (!validatePayment()) return;
 
-    if (current.status === 'paid') {
-      setError('This billing has already been paid.');
-      setShowPaymentModal(false);
-      return;
-    }
+  if (current.status === 'paid') {
+    setShowPaymentModal(false);
+    return;
+  }
 
-    setSubmitting(true);
-    setError('');
-    setSuccess('');
+  setSubmitting(true);
+  setSuccess('');
 
-    try {
-      let target = current;
-      if (!current.billing_id) target = await promoteLocalCartToServerDraft();
-      else target = (await persistDraftHeader()) || current;
+  try {
+    let target = current;
+    if (!current.billing_id) target = await promoteLocalCartToServerDraft();
+    else target = (await persistDraftHeader()) || current;
 
-      await billingService.charge(target.billing_id, {
-        payment_method: paymentMethod,
-        amount_received: Number(amountReceived || 0),
-        amount_tendered:
-          paymentMethod === 'cash'
-            ? Number(amountTendered || amountReceived || 0)
-            : Number(amountReceived || 0),
-        points_redeemed: pointsToRedeem || 0,
-        mpesa_phone: paymentMethod === 'mpesa' ? mpesaPhone : null,
-        mpesa_code: paymentMethod === 'mpesa' ? mpesaCode : null,
-        card_reference: paymentMethod === 'card' ? cardReference : null,
-        card_holder: paymentMethod === 'card' ? cardHolder || null : null,
-      });
+    await billingService.charge(target.billing_id, {
+      payment_method: paymentMethod,
+      amount_received: Number(amountReceived || 0),
+      amount_tendered:
+        paymentMethod === 'cash'
+          ? Number(amountTendered || amountReceived || 0)
+          : Number(amountReceived || 0),
+      points_redeemed: Number(pointsToRedeem || 0),
+      mpesa_phone: paymentMethod === 'mpesa' ? mpesaPhone : null,
+      mpesa_code: paymentMethod === 'mpesa' ? mpesaCode : null,
+      card_reference: paymentMethod === 'card' ? cardReference : null,
+      card_holder: paymentMethod === 'card' ? cardHolder || null : null,
+    });
 
-      const paidResponse = await billingService.show(target.billing_id);
-      const paidBilling = paidResponse?.data || paidResponse;
+    const paidResponse = await billingService.show(target.billing_id);
+    const paidBilling = paidResponse?.data || paidResponse;
 
-      const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
-      openBillingPrint(paidBilling, currentStore, printMode, printSettings);
+    const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
+    openBillingPrint(paidBilling, currentStore, printMode, printSettings);
 
-      removeDraftPreview(target.billing_id);
-      resetSale();
-      setPointsToRedeem(0);
-      setShowPaymentModal(false);
-      setSuccess('Payment processed successfully.');
-      focusSearchInput(true);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to process payment.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+    removeDraftPreview(target.billing_id);
+    resetSale();
+    setPointsToRedeem(0);
+    setShowPaymentModal(false);
+    setSuccess('Payment processed successfully.');
+    focusSearchInput(true);
+  } catch (err) {
+    setPaymentError(err?.response?.data?.message || err?.message || 'Unable to process payment.');
+  } finally {
+    setSubmitting(false);
+  }
+};
 
   const handleLoadDraft = async (draftId) => {
     setError('');
@@ -1471,6 +1583,53 @@ rewardService.customerLoyalty({
     resetSale,
   ]);
 
+const handleClaimChapa5Reward = useCallback(async () => {
+  if (!chapa5Preview?.claimable_free_items || !chapa5Preview?.product_sku) return;
+
+  const itemsToAdd = chapa5Preview.claimable_free_items; // only unclaimed ones
+
+  setError('');
+  setSubmitting(true);
+
+  try {
+    const freeProduct = products.find(
+      (p) => p.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+    );
+
+    if (!freeProduct) {
+      setError('Free item product not found in catalog.');
+      return;
+    }
+
+    let target = billingRef.current;
+    if (!target?.billing_id) {
+      target = await promoteLocalCartToServerDraft();
+    } else {
+      target = (await persistDraftHeader()) || target;
+    }
+
+    if (!target?.billing_id) {
+      setError('Unable to save cart before claiming reward.');
+      return;
+    }
+
+    // Backend will increment existing free line if one exists
+    await billingService.addItem(target.billing_id, {
+      product_id: freeProduct.product_id,
+      quantity: itemsToAdd,
+      unit_price: 0,
+    });
+
+    setChapa5ClaimedQty((prev) => prev + itemsToAdd);
+    await loadBillingDetail(target.billing_id, { silent: true });
+
+  } catch (err) {
+    setError(err?.response?.data?.message || err?.message || 'Failed to add free item.');
+  } finally {
+    setSubmitting(false);
+  }
+}, [chapa5Preview, products, billingRef, promoteLocalCartToServerDraft, persistDraftHeader, loadBillingDetail]);
+
   /* ----- global hotkeys ---------------------------------------------- */
   useEffect(() => {
     const handleGlobalKeyDown = (event) => {
@@ -1550,12 +1709,28 @@ rewardService.customerLoyalty({
     });
   }, [drafts, draftSearch]);
 
-  const customerCurrentBalance = Number(
-    selectedCustomer?.current_balance ??
-    selectedCustomer?.balance ??
-    selectedCustomer?.opening_balance ??
-    0
+const customerCurrentBalance = Number(
+  billing?.customer?.current_balance ??
+  selectedCustomer?.current_balance ??
+  selectedCustomer?.balance ??
+  selectedCustomer?.opening_balance ??
+  0
+);
+// ↓ ADD HERE — keeps "Amount to be paid" in sync when cashier adjusts points
+useEffect(() => {
+  if (!showPaymentModal) return;
+
+  const invoiceAmount = Number(billing?.total || 0);
+  const loyaltyPointValue = loyaltyRule?.active_rule?.point_value ?? 1;
+  const loyaltyDiscount = Math.max(
+    0,
+    Math.min(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
   );
+  const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
+  const combinedPayable = discountedInvoiceAmount + customerCurrentBalance;
+
+  setAmountReceived(combinedPayable > 0 ? String(combinedPayable) : '');
+}, [pointsToRedeem, showPaymentModal]);
 
   /* =====================================================================
      PAGINATION HANDLERS
@@ -1990,7 +2165,30 @@ rewardService.customerLoyalty({
                 <p className="muted">Empty billing...hover over a product to add it.</p>
               )}
             </div>
-
+{chapa5Preview?.enabled && selectedCustomerId && (
+  <div className={`chapa5-reward-banner ${chapa5Preview.qualifies ? 'qualifies' : ''}`}>
+    {/* <div className="chapa5-info">
+      <strong>{chapa5Preview.label}</strong>
+      {' '}
+      <span className="chapa5-progress">
+        {chapa5Preview.display_progress}/{chapa5Preview.buy_count} punches
+        {chapa5Preview.qualifies
+          ? ` — 🎉 ${chapa5Preview.free_items} free item(s) earned!`
+          : ` — ${chapa5Preview.buy_count - chapa5Preview.display_progress} more to go`}
+      </span>
+    </div> */}
+    {chapa5Preview.claimable_free_items > 0 && (
+      <button
+        type="button"
+        className="primary-button chapa5-claim-btn"
+        onClick={handleClaimChapa5Reward}
+        disabled={submitting}  // ← no longer permanently disabled
+      >
+        Redeem {chapa5Preview.claimable_free_items} reward
+      </button>
+    )}
+  </div>
+)}
             <div className="billing-summary-container">
               <div className="billing-summary-list">
                 <div className="summary-row">
@@ -2030,38 +2228,43 @@ rewardService.customerLoyalty({
         </aside>
       </section>
 
-      <PaymentModal
-        isOpen={showPaymentModal}
-        billing={billing}
-        currentStore={currentStore}
-        itemCount={itemCount}
-        selectedCustomer={selectedCustomer}
-        customerCurrentBalance={customerCurrentBalance}
-        paymentMethod={paymentMethod}
-        amountReceived={amountReceived}
-        setAmountReceived={setAmountReceived}
-        amountTendered={amountTendered}
-        setAmountTendered={setAmountTendered}
-        mpesaPhone={mpesaPhone}
-        setMpesaPhone={setMpesaPhone}
-        mpesaCode={mpesaCode}
-        setMpesaCode={setMpesaCode}
-        cardReference={cardReference}
-        setCardReference={setCardReference}
-        cardHolder={cardHolder}
-        setCardHolder={setCardHolder}
-        submitting={submitting}
-        currency={currency}
-        onPaymentMethodChange={handlePaymentMethodChange}
-        onClose={() => setShowPaymentModal(false)}
-        onCharge={handleCharge}
-      
+<PaymentModal
+  isOpen={showPaymentModal}
+  billing={billing}
+  currentStore={currentStore}
+  itemCount={itemCount}
+  selectedCustomer={selectedCustomer}
+  customerCurrentBalance={customerCurrentBalance}
+  paymentMethod={paymentMethod}
+  amountReceived={amountReceived}
+  setAmountReceived={setAmountReceived}
+  amountTendered={amountTendered}
+  setAmountTendered={setAmountTendered}
+  mpesaPhone={mpesaPhone}
+  setMpesaPhone={setMpesaPhone}
+  mpesaCode={mpesaCode}
+  setMpesaCode={setMpesaCode}
+  cardReference={cardReference}
+  setCardReference={setCardReference}
+  cardHolder={cardHolder}
+  setCardHolder={setCardHolder}
+  submitting={submitting}
+  currency={currency}
+  onPaymentMethodChange={handlePaymentMethodChange}
+  onClose={() => { setShowPaymentModal(false); setPaymentError(''); }}
+  onCharge={handleCharge}
   loyaltyPoints={loyaltyRule?.loyalty_points ?? 0}
   loyaltyPointValue={loyaltyRule?.active_rule?.point_value ?? 1}
   pointsToRedeem={pointsToRedeem}
   setPointsToRedeem={setPointsToRedeem}
   chapa5={loyaltyRule?.chapa5 ?? null}
-      />
+  chapa5Preview={chapa5Preview}
+  onClaimChapa5Reward={handleClaimChapa5Reward}
+  loyaltyMinPoints={loyaltyRule?.active_rule?.min_points ?? 0}
+  paymentError={paymentError}
+  setPaymentError={setPaymentError}
+/>
+
 
       <DraftModal
         isOpen={showDraftModal}

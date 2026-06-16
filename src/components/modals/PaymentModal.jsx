@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import {
   CreditCard,
+  Gift,
   Smartphone,
   Wallet,
   X,
@@ -51,41 +53,53 @@ export default function PaymentModal({
   onPaymentMethodChange,
   onClose,
   onCharge,
+
   loyaltyPoints = 0,
   loyaltyPointValue = 1,
-  pointsToRedeem,
+  pointsToRedeem = 0,
   setPointsToRedeem,
-  chapa5 = null,          // ← add
-  loyaltyDiscount,
+  chapa5 = null,
+  chapa5Preview = null,
+  onClaimChapa5Reward,
+  paymentError = '',
+  setPaymentError,
+  loyaltyMinPoints = 0,
 }) {
+
+  const [loyaltyError, setLoyaltyError] = useState('');
+
   if (!isOpen) return null;
 
   const invoiceAmount = Number(billing?.total || 0);
   const activeBalance = Number(
     billing?.customer?.current_balance ??
-      selectedCustomer?.current_balance ??
-      customerCurrentBalance ??
-      0
+    selectedCustomer?.current_balance ??
+    customerCurrentBalance ??
+    0
   );
 
-  const combinedPayable = invoiceAmount + activeBalance;
+  const loyaltyDiscount = Math.max(
+    0,
+    Math.min(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
+  );
 
-  const changeAmount = (() => {
-    const cashTendered = Number(amountTendered || 0);
-    const invoiceTarget = Number(amountReceived || billing?.total || 0);
-    const realChange = cashTendered - (invoiceTarget + activeBalance);
-    return realChange > 0 ? realChange.toFixed(2) : '0.00';
-  })();
+  const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
+  const combinedPayable = discountedInvoiceAmount + activeBalance;
+
+  const effectiveAmountToBePaid = Number(amountReceived || combinedPayable || 0);
+  const effectiveCashTendered = Number(amountTendered || 0);
+
+  const changeAmount =
+    paymentMethod === 'cash'
+      ? Math.max(effectiveCashTendered - effectiveAmountToBePaid, 0).toFixed(2)
+      : '0.00';
+
+  const canClaimFreeReward =
+    !!chapa5Preview?.qualifies && Number(chapa5Preview?.claimable_free_items || 0) > 0;
 
   return (
-    <div
-      className="modal-backdrop"
-      onClick={() => !submitting && onClose()}
-    >
-      <div
-        className="modal-card payment-modal-card"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="modal-backdrop" onClick={() => !submitting && onClose()}>
+      <div className="modal-card payment-modal-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <h3>Payment</h3>
@@ -107,9 +121,22 @@ export default function PaymentModal({
         <div className="modal-content payment-modal-content">
           <div className="payment-summary-strip">
             <div className="payment-summary-pill">
-              <span>Total due</span>
-              <strong>{currency(invoiceAmount, currentStore?.currency)}</strong>
+              <span>Sale total</span>
+              <strong>{currency(discountedInvoiceAmount, currentStore?.currency)}</strong>
             </div>
+
+            {/* {loyaltyDiscount > 0 ? (
+  <div className="payment-summary-pill" style={{ opacity: 0.55 }}>
+    <span style={{ textDecoration: 'line-through' }}>
+      {currency(invoiceAmount, currentStore?.currency)}
+    </span>
+  </div>
+) : null} */}
+{/* 
+            <div className="payment-summary-pill">
+              <span>Payable now</span>
+              <strong>{currency(combinedPayable, currentStore?.currency)}</strong>
+            </div> */}
 
             <div className="payment-summary-pill">
               <span>Items</span>
@@ -122,128 +149,163 @@ export default function PaymentModal({
                 <strong>{selectedCustomer?.full_name || 'Selected'}</strong>
               </div>
             ) : null}
-                        {loyaltyPoints > 0 ? (
-              <div className="payment-summary-pill" style={{ borderColor: 'var(--color-border-success)' }}>
-                <span>Loyalty points</span>
-                <strong style={{ color: 'var(--color-text-success)' }}>
-                  {loyaltyPoints} pts
-                </strong>
-              </div>
-            ) : null}
+
+{loyaltyPoints > 0 && selectedCustomer ? (
+  <div className="payment-summary-pill">
+    <span>Loyalty points</span>
+    <strong style={{ color: 'var(--success)' }}>{loyaltyPoints} pts</strong>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {/* Redeem button — hidden once points are applied */}
+        {pointsToRedeem <= 0 ? (
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => {
+              const minPoints = loyaltyMinPoints ?? 0;
+              if (loyaltyPoints < minPoints) {
+                setLoyaltyError(`Minimum redemption is ${minPoints.toFixed(2)} points.`);
+                return;
+              }
+              setLoyaltyError('');
+              const maxPoints = Math.min(
+                loyaltyPoints,
+                Math.floor(invoiceAmount / loyaltyPointValue)
+              );
+              setPointsToRedeem(maxPoints);
+            }}
+          >
+            Redeem
+          </button>
+        ) : (
+          <span style={{ fontSize: 13, color: 'var(--success)', fontWeight: 600 }}>
+            -{currency(loyaltyDiscount, currentStore?.currency)} applied
+          </span>
+        )}
+
+<button
+  type="button"
+  className="icon-button danger-icon"
+  style={{ padding: '4px' }}
+  title="Clear redemption"
+  onClick={() => {
+    setPointsToRedeem(0);
+    setLoyaltyError('');
+  }}
+>
+  <X size={14} />
+</button>
+      </div>
+
+      {loyaltyError ? (
+        <span style={{ fontSize: 12, color: 'var(--danger, #e53e3e)' }}>{loyaltyError}</span>
+      ) : null}
+    </div>
+  </div>
+) : null}
           </div>
-          {/* Chapa 5 punch card banner */}
-          {chapa5?.enabled && selectedCustomer ? (
-            <div style={{
-              padding: '10px 14px',
-              borderRadius: 8,
-              background: chapa5.punches_needed === 0
-                ? 'var(--color-background-success)'
-                : 'var(--color-background-info)',
-              border: `1px solid ${chapa5.punches_needed === 0
-                ? 'var(--color-border-success)'
-                : 'var(--color-border-info)'}`,
-              marginBottom: 12,
-            }}>
-              {chapa5.punches_needed === 0 ? (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <strong style={{ color: 'var(--color-text-success)' }}>
-                      🎉 {chapa5.label} Reward Ready!
-                    </strong>
-                    <p style={{ margin: '2px 0 0', fontSize: 13, color: 'var(--color-text-success)' }}>
-                      Customer gets {chapa5.free_count} free item(s) — apply discount manually
-                    </p>
-                  </div>
-                  <span className="status-badge paid" style={{ fontSize: 13 }}>
-                    {chapa5.free_count} FREE
+
+          {/* {chapa5?.enabled && selectedCustomer ? (
+            <div
+              className="payment-fields-card"
+              style={{
+                borderColor: 'var(--line)',
+                background: 'var(--panel-2)',
+              }}
+            >
+              <div style={{ display: 'grid', gap: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                  <strong>Chapa promotion</strong>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    SKU: {chapa5?.product_sku || '-'}
                   </span>
                 </div>
-              ) : (
+
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                    <strong style={{ fontSize: 13 }}>
-                      🥊 {chapa5.label}
-                    </strong>
+                    <strong style={{ fontSize: 13 }}>{chapa5.label}</strong>
                     <span className="muted" style={{ fontSize: 12 }}>
-                      {chapa5.progress} / {chapa5.buy_count} punches
+                      Current progress: {chapa5.progress} / {chapa5.buy_count}
                     </span>
                   </div>
-                  <div style={{
-                    height: 8,
-                    background: 'var(--color-border-tertiary)',
-                    borderRadius: 4,
-                    overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      height: '100%',
-                      width: `${(chapa5.progress / chapa5.buy_count) * 100}%`,
-                      background: 'var(--color-text-info)',
-                      borderRadius: 4,
-                      transition: 'width 0.3s ease',
-                    }} />
+
+                  <div
+                    style={{
+                      height: 8,
+                      background: 'var(--line)',
+                      borderRadius: 999,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: '100%',
+                        width: `${(Number(chapa5.progress || 0) / Number(chapa5.buy_count || 1)) * 100}%`,
+                        background: 'var(--brand-blue)',
+                        borderRadius: 999,
+                        transition: 'width 0.3s ease',
+                      }}
+                    />
                   </div>
-                  <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                    {chapa5.punches_needed} more purchase(s) to earn {chapa5.free_count} free item
+
+                  <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                    {chapa5.punches_needed} more qualifying item(s) needed for the next reward.
                   </p>
                 </div>
-              )}
-            </div>
-          ) : null}
-                    {/* ✅ ADD HERE — loyalty redemption block */}
-          {loyaltyPoints > 0 && selectedCustomer ? (
-            <div className="payment-fields-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <strong>Redeem loyalty points</strong>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {loyaltyPoints} available · {currency(loyaltyPoints * loyaltyPointValue, currentStore?.currency)} value
-                </span>
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  className="text-input"
-                  type="number"
-                  min="0"
-                  max={loyaltyPoints}
-                  value={pointsToRedeem || ''}
-                  onChange={(e) => setPointsToRedeem(Number(e.target.value))}
-                  placeholder="Points to redeem"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => {
-                    const maxPoints = Math.min(
-                      loyaltyPoints,
-                      Math.floor(invoiceAmount / loyaltyPointValue)
-                    );
-                    setPointsToRedeem(maxPoints);
+            </div>
+          ) : null} */}
+
+          {chapa5Preview?.qualifies ? (
+            <div
+              className="payment-fields-card"
+              style={{
+                borderColor: '#ccead7',
+                background: '#f6fffa',
+              }}
+            >
+              <div style={{ display: 'grid', gap: 10 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                    padding: '12px 14px',
+                    borderRadius: 10,
+                    background: '#eaf8ef',
+                    border: '1px solid #ccead7',
                   }}
                 >
-                  Redeem max
-                </button>
-                {pointsToRedeem > 0 ? (
-                  <button
-                    type="button"
-                    className="ghost-button danger"
-                    onClick={() => setPointsToRedeem(0)}
-                  >
-                    Clear
-                  </button>
-                ) : null}
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    <strong style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Gift size={16} />
+                      Reward ready
+                    </strong>
+                    <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                      {chapa5Preview.free_items} free item(s) available from this checkout.
+                    </span>
+                  </div>
+
+                  {canClaimFreeReward ? (
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={onClaimChapa5Reward}
+                      disabled={submitting}
+                    >
+                      Claim reward
+                    </button>
+                  ) : (
+                    <span className="badge success">
+                      Added to cart
+                    </span>
+                  )}
+                </div>
               </div>
-              {pointsToRedeem > 0 ? (
-                <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                  Discount: <strong>{currency(pointsToRedeem * loyaltyPointValue, currentStore?.currency)}</strong>
-                  {' · '}
-                  Remaining due: <strong>
-                    {currency(Math.max(invoiceAmount - (pointsToRedeem * loyaltyPointValue), 0), currentStore?.currency)}
-                  </strong>
-                </p>
-              ) : null}
             </div>
           ) : null}
-
           <div className="payment-method-card-grid">
             {PAYMENT_METHODS.map((method) => {
               const Icon = method.icon;
@@ -252,9 +314,7 @@ export default function PaymentModal({
                 <button
                   key={method.key}
                   type="button"
-                  className={`payment-method-card ${
-                    paymentMethod === method.key ? 'active' : ''
-                  }`}
+                  className={`payment-method-card ${paymentMethod === method.key ? 'active' : ''}`}
                   onClick={() => onPaymentMethodChange(method.key)}
                 >
                   <div className="payment-method-card-top">
@@ -273,22 +333,8 @@ export default function PaymentModal({
             <div className="payment-fields-card">
               {paymentMethod === 'cash' ? (
                 <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span>
-                      Amount to be paid
-                      {selectedCustomer && activeBalance > 0 ? (
-                        <span
-                          style={{
-                            color: '#2563eb',
-                            fontWeight: 'bold',
-                            marginLeft: '6px',
-                          }}
-                        >
-                          ({`+${activeBalance.toFixed(2)}`})
-                        </span>
-                      ) : null}
-                    </span>
-
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span>Amount to be paid</span>
                     <input
                       className="text-input"
                       type="number"
@@ -296,11 +342,11 @@ export default function PaymentModal({
                       step="0.01"
                       value={amountReceived}
                       onChange={(e) => setAmountReceived(e.target.value)}
-                      placeholder="Amount to be paid"
+                      placeholder={combinedPayable.toFixed(2)}
                     />
                   </label>
 
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>Cash received</span>
                     <input
                       className="text-input"
@@ -313,18 +359,14 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>Change</span>
                     <input
                       className="text-input"
                       type="text"
                       value={changeAmount}
                       readOnly
-                      placeholder="0.00"
-                      style={{
-                        fontWeight: 'bold',
-                        backgroundColor: '#f5f5f5',
-                      }}
+                      style={{ fontWeight: 'bold', backgroundColor: '#f5f5f5' }}
                     />
                   </label>
                 </div>
@@ -332,22 +374,8 @@ export default function PaymentModal({
 
               {paymentMethod === 'mpesa' ? (
                 <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span>
-                      Amount to be paid
-                      {selectedCustomer && activeBalance > 0 ? (
-                        <span
-                          style={{
-                            color: '#2563eb',
-                            fontWeight: 'bold',
-                            marginLeft: '6px',
-                          }}
-                        >
-                          ({`+${activeBalance.toFixed(2)}`})
-                        </span>
-                      ) : null}
-                    </span>
-
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span>Amount to be paid</span>
                     <input
                       className="text-input"
                       type="number"
@@ -359,7 +387,7 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>MPESA phone number</span>
                     <input
                       className="text-input"
@@ -370,10 +398,7 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <label
-                    className="span-2"
-                    style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
-                  >
+                  <label className="span-2" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>MPESA transaction code</span>
                     <input
                       className="text-input"
@@ -388,22 +413,8 @@ export default function PaymentModal({
 
               {paymentMethod === 'card' ? (
                 <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span>
-                      Amount to be paid
-                      {selectedCustomer && activeBalance > 0 ? (
-                        <span
-                          style={{
-                            color: '#2563eb',
-                            fontWeight: 'bold',
-                            marginLeft: '6px',
-                          }}
-                        >
-                          ({`+${activeBalance.toFixed(2)}`})
-                        </span>
-                      ) : null}
-                    </span>
-
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span>Amount to be paid</span>
                     <input
                       className="text-input"
                       type="number"
@@ -415,7 +426,7 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>Card holder</span>
                     <input
                       className="text-input"
@@ -426,10 +437,7 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <label
-                    className="span-2"
-                    style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}
-                  >
+                  <label className="span-2" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span>Card reference</span>
                     <input
                       className="text-input"
@@ -447,16 +455,21 @@ export default function PaymentModal({
               <p>Select a payment method to show the required fields.</p>
             </div>
           )}
+            {paymentError ? (
+    <div className="form-error" style={{ margin: '0 0 8px' }}>
+      {paymentError}
+    </div>
+  ) : null}
 
           <div className="payment-modal-actions">
-<button
-  type="button"
-  className="primary-button"
-  onClick={onCharge}
-  disabled={!billing?.items?.length || submitting || !paymentMethod || billing?.status === 'paid'}
->
-  {billing?.status === 'paid' ? 'Already paid' : 'Charge Payment'}
-</button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={onCharge}
+              disabled={!billing?.items?.length || submitting || !paymentMethod || billing?.status === 'paid'}
+            >
+              {billing?.status === 'paid' ? 'Already paid' : 'Charge Payment'}
+            </button>
 
             <button
               type="button"

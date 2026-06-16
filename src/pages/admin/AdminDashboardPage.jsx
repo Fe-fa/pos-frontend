@@ -61,6 +61,9 @@ const dateOnlyKey = (value) => {
 const getBillingDate = (billing) =>
   billing?.billing_date || billing?.created_at || billing?.updated_at || null;
 
+const getBillingTotal = (billing) =>
+  toNumber(billing?.total || billing?.grand_total || billing?.total_amount || 0);
+
 const getPaidAmount = (billing) => {
   const explicit = Number(
     billing?.paid_amount ?? billing?.amount_paid ?? billing?.total_paid
@@ -70,6 +73,13 @@ const getPaidAmount = (billing) => {
   return isPaidStatus(billing?.status)
     ? toNumber(billing?.total || billing?.grand_total || billing?.total_amount || 0)
     : 0;
+};
+
+const getOutstandingAmount = (billing) => {
+  const total = getBillingTotal(billing);
+  const explicitBalance = Number(billing?.balance_due ?? billing?.balance);
+  if (Number.isFinite(explicitBalance)) return Math.max(explicitBalance, 0);
+  return Math.max(total - getPaidAmount(billing), 0);
 };
 
 const averageDefined = (values) => {
@@ -147,6 +157,52 @@ function buildLast7DaysSeries(billings) {
     const key = dateOnlyKey(getBillingDate(billing));
     if (!key || !map.has(key)) return;
     map.get(key).amount += getPaidAmount(billing);
+  });
+
+  return Array.from(map.values());
+}
+
+function buildLast7DaysDetailedSeries(billings) {
+  const today = new Date();
+  const map = new Map();
+
+  for (let i = 6; i >= 0; i -= 1) {
+    const date = shiftDays(today, -i);
+    const key = dateOnlyKey(date);
+    const label = date.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+
+    map.set(key, {
+      key,
+      label,
+      collected: 0,
+      billed: 0,
+      outstanding: 0,
+      refunds: 0,
+    });
+  }
+
+  billings.forEach((billing) => {
+    const key = dateOnlyKey(getBillingDate(billing));
+    if (!key || !map.has(key)) return;
+
+    const row = map.get(key);
+    const status = normalizeStatus(billing?.status);
+    const total = getBillingTotal(billing);
+    const paid = getPaidAmount(billing);
+    const outstanding = getOutstandingAmount(billing);
+
+    if (status !== 'draft') {
+      row.billed += total;
+      row.outstanding += outstanding;
+    }
+
+    if (isPaidStatus(status)) {
+      row.collected += paid;
+    }
+
+    if (['refund', 'refunded'].includes(status)) {
+      row.refunds += total || paid;
+    }
   });
 
   return Array.from(map.values());
@@ -352,6 +408,189 @@ function HealthTile({ icon: Icon, label, value, caption, tone = 'soft' }) {
   );
 }
 
+function HeaderPill({ children }) {
+  return <span className="dashboard-header-pill">{children}</span>;
+}
+
+function PulseTile({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone = 'blue',
+  trendDirection = 'neutral',
+}) {
+  return (
+    <div className="pulse-tile">
+      <div className={`pulse-icon tone-${tone}`}>
+        <Icon size={18} />
+      </div>
+
+      <div className="pulse-copy">
+        <strong>{value}</strong>
+        <span>{label}</span>
+      </div>
+
+      <small className={`pulse-trend ${trendDirection}`}>{hint}</small>
+    </div>
+  );
+}
+
+function SimpleLineChart({ series, lines, currencyCode }) {
+  const width = 640;
+  const height = 260;
+  const padding = { top: 20, right: 16, bottom: 34, left: 16 };
+  const innerWidth = width - padding.left - padding.right;
+  const innerHeight = height - padding.top - padding.bottom;
+
+  const maxValue = Math.max(
+    ...series.flatMap((item) => lines.map((line) => toNumber(item[line.key]))),
+    1
+  );
+
+  const getX = (index) =>
+    padding.left +
+    (series.length <= 1 ? innerWidth / 2 : (index * innerWidth) / (series.length - 1));
+
+  const getY = (value) =>
+    padding.top + innerHeight - (toNumber(value) / maxValue) * innerHeight;
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((step) => ({
+    y: padding.top + innerHeight - innerHeight * step,
+  }));
+
+  const buildPath = (key) =>
+    series
+      .map((item, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(item[key])}`)
+      .join(' ');
+
+  return (
+    <div className="sales-graph-shell">
+      <div className="sales-legend">
+        {lines.map((line) => (
+          <span key={line.key} className="sales-legend-item">
+            <i style={{ background: line.color }} />
+            {line.label}
+          </span>
+        ))}
+      </div>
+
+      <svg viewBox={`0 0 ${width} ${height}`} className="sales-graph-svg" role="img">
+        {gridLines.map((line) => (
+          <line
+            key={line.y}
+            x1={padding.left}
+            x2={width - padding.right}
+            y1={line.y}
+            y2={line.y}
+            className="sales-grid-line"
+          />
+        ))}
+
+        {series.map((item, index) => (
+          <text
+            key={item.key}
+            x={getX(index)}
+            y={height - 10}
+            textAnchor="middle"
+            className="sales-axis-label"
+          >
+            {item.label}
+          </text>
+        ))}
+
+        {lines.map((line) => (
+          <path
+            key={line.key}
+            d={buildPath(line.key)}
+            fill="none"
+            stroke={line.color}
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ))}
+
+        {lines.map((line) =>
+          series.map((item, index) => (
+            <circle
+              key={`${line.key}-${item.key}`}
+              cx={getX(index)}
+              cy={getY(item[line.key])}
+              r="4"
+              fill={line.color}
+              stroke="#fff"
+              strokeWidth="2"
+            />
+          ))
+        )}
+      </svg>
+
+      <div className="sales-graph-summary">
+        <div>
+          <span>Collected</span>
+          <strong>
+            {currency(
+              series.reduce((sum, item) => sum + toNumber(item.collected), 0),
+              currencyCode
+            )}
+          </strong>
+        </div>
+        <div>
+          <span>Billed</span>
+          <strong>
+            {currency(
+              series.reduce((sum, item) => sum + toNumber(item.billed), 0),
+              currencyCode
+            )}
+          </strong>
+        </div>
+        <div>
+          <span>Outstanding</span>
+          <strong>
+            {currency(
+              series.reduce((sum, item) => sum + toNumber(item.outstanding), 0),
+              currencyCode
+            )}
+          </strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DonutChart({ value, total, label, sublabel }) {
+  const safeTotal = Math.max(toNumber(total), 1);
+  const ratio = Math.min(Math.max(toNumber(value) / safeTotal, 0), 1);
+  const radius = 54;
+  const circumference = 2 * Math.PI * radius;
+  const dash = circumference * ratio;
+
+  return (
+    <div className="donut-card">
+      <div className="donut-visual">
+        <svg viewBox="0 0 140 140" className="donut-svg">
+          <circle cx="70" cy="70" r={radius} className="donut-track" />
+          <circle
+            cx="70"
+            cy="70"
+            r={radius}
+            className="donut-progress"
+            strokeDasharray={`${dash} ${circumference - dash}`}
+          />
+        </svg>
+
+        <div className="donut-center">
+          <strong>{formatPercent(ratio * 100)}</strong>
+          <span>{label}</span>
+        </div>
+      </div>
+
+      <p>{sublabel}</p>
+    </div>
+  );
+}
+
 export default function SuperAdminDashboardPage() {
   const { user } = useAuth();
   const { stores, activeStore } = useStore();
@@ -553,10 +792,131 @@ export default function SuperAdminDashboardPage() {
     dashboard.platform.prevTenants30
   );
 
+  const analytics = useMemo(() => {
+    const todayKey = dateOnlyKey(new Date());
+    const billings = dashboard.allBillings;
+    const inventory = dashboard.allInventory;
+    const detailed7Days = buildLast7DaysDetailedSeries(billings);
+
+    const todayBillings = billings.filter(
+      (billing) => dateOnlyKey(getBillingDate(billing)) === todayKey
+    );
+
+    const todayCollected = todayBillings
+      .filter((item) => isPaidStatus(item?.status))
+      .reduce((sum, item) => sum + getPaidAmount(item), 0);
+
+    const todayOrders = todayBillings.filter(
+      (item) => normalizeStatus(item?.status) !== 'draft'
+    ).length;
+
+    const todayRefunds = todayBillings.filter((item) =>
+      ['refund', 'refunded'].includes(normalizeStatus(item?.status))
+    );
+
+    const todayRefundValue = todayRefunds.reduce(
+      (sum, item) => sum + (getBillingTotal(item) || getPaidAmount(item)),
+      0
+    );
+
+    const todayVoids = todayBillings.filter((item) =>
+      ['void', 'voided', 'cancelled', 'canceled', 'draft'].includes(
+        normalizeStatus(item?.status)
+      )
+    ).length;
+
+    const todayOutstanding = todayBillings.reduce(
+      (sum, item) => sum + getOutstandingAmount(item),
+      0
+    );
+
+    const grossBilled = billings
+      .filter((item) => normalizeStatus(item?.status) !== 'draft')
+      .reduce((sum, item) => sum + getBillingTotal(item), 0);
+
+    const paidCollections = billings
+      .filter((item) => isPaidStatus(item?.status))
+      .reduce((sum, item) => sum + getPaidAmount(item), 0);
+
+    const outstandingTotal = billings.reduce(
+      (sum, item) => sum + getOutstandingAmount(item),
+      0
+    );
+
+    const allOrders = billings.filter(
+      (item) => normalizeStatus(item?.status) !== 'draft'
+    ).length;
+
+    const averageTicket = allOrders > 0 ? paidCollections / allOrders : 0;
+    const avgOrdersPerTenant =
+      dashboard.platform.activeTenants > 0
+        ? allOrders / dashboard.platform.activeTenants
+        : 0;
+
+    const avgCustomersPerTenant =
+      dashboard.platform.activeTenants > 0
+        ? dashboard.customers / dashboard.platform.activeTenants
+        : 0;
+
+    const avgRevenuePerTenant =
+      dashboard.platform.activeTenants > 0
+        ? paidCollections / dashboard.platform.activeTenants
+        : 0;
+
+    const collectionRate = grossBilled > 0 ? (paidCollections / grossBilled) * 100 : 0;
+
+    const lowStockCount = inventory.filter(
+      (item) => toNumber(item?.quantity) <= toNumber(item?.reorder_level)
+    ).length;
+
+    const healthyStockCount = Math.max(inventory.length - lowStockCount, 0);
+    const inventoryHealth =
+      inventory.length > 0 ? (healthyStockCount / inventory.length) * 100 : 0;
+
+    const newTenantsToday = stores.filter(
+      (store) => dateOnlyKey(store?.created_at || store?.createdAt) === todayKey
+    ).length;
+
+    const projectedMonthlyCollections =
+      detailed7Days.length > 0
+        ? (detailed7Days.reduce((sum, item) => sum + item.collected, 0) / detailed7Days.length) *
+          30
+        : 0;
+
+    const openBalancesCount = billings.filter(
+      (item) => getOutstandingAmount(item) > 0
+    ).length;
+
+    return {
+      detailed7Days,
+      todayCollected,
+      todayOrders,
+      todayRefundCount: todayRefunds.length,
+      todayRefundValue,
+      todayVoids,
+      todayOutstanding,
+      grossBilled,
+      paidCollections,
+      outstandingTotal,
+      allOrders,
+      averageTicket,
+      avgOrdersPerTenant,
+      avgCustomersPerTenant,
+      avgRevenuePerTenant,
+      collectionRate,
+      lowStockCount,
+      healthyStockCount,
+      inventoryHealth,
+      newTenantsToday,
+      projectedMonthlyCollections,
+      openBalancesCount,
+    };
+  }, [dashboard, stores]);
+
   if (loading) return <div className="page-loader">Preparing dashboard…</div>;
 
   return (
-    <section className="stack-lg">
+    <section className="stack-lg super-admin-dashboard-v2">
       <div className="metrics-grid">
         <MetricCard
           icon={Wallet}
@@ -592,84 +952,275 @@ export default function SuperAdminDashboardPage() {
         />
       </div>
 
-      <div className="dashboard-grid">
-        <article className="card">
-          <div className="card-header">
+      <div className="dashboard-grid dashboard-hero-grid">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
             <div>
-              <h3>Platform revenue · last 7 days</h3>
-              <p>Combined paid collections across all tenant stores</p>
+              <h3>Today's platform pulse</h3>
+              <p>Quick operational snapshot across all connected stores</p>
             </div>
+            <HeaderPill>Today</HeaderPill>
           </div>
-          <MiniBars series={dashboard.last7Days} currencyCode={currentCurrency} />
+
+          <div className="takings-grid">
+            <PulseTile
+              icon={Wallet}
+              label="Collected"
+              value={currency(analytics.todayCollected, currentCurrency)}
+              hint={`${analytics.todayOrders} orders today`}
+              tone="green"
+              trendDirection={analytics.todayCollected > 0 ? 'up' : 'neutral'}
+            />
+
+            <PulseTile
+              icon={CreditCard}
+              label="Refunds"
+              value={currency(analytics.todayRefundValue, currentCurrency)}
+              hint={`${analytics.todayRefundCount} refund rows`}
+              tone="yellow"
+              trendDirection={analytics.todayRefundCount > 0 ? 'down' : 'neutral'}
+            />
+
+            <PulseTile
+              icon={AlertTriangle}
+              label="Voids / drafts"
+              value={analytics.todayVoids}
+              hint="Orders needing review"
+              tone="red"
+              trendDirection={analytics.todayVoids > 0 ? 'down' : 'neutral'}
+            />
+
+            <PulseTile
+              icon={BarChart3}
+              label="Open balances"
+              value={currency(analytics.todayOutstanding, currentCurrency)}
+              hint="Still unpaid today"
+              tone="blue"
+              trendDirection={analytics.todayOutstanding > 0 ? 'down' : 'up'}
+            />
+
+            <PulseTile
+              icon={UserPlus}
+              label="New tenants"
+              value={analytics.newTenantsToday}
+              hint="Created today"
+              tone="blue"
+              trendDirection={analytics.newTenantsToday > 0 ? 'up' : 'neutral'}
+            />
+
+            <PulseTile
+              icon={Building2}
+              label="Active tenants"
+              value={dashboard.platform.activeTenants}
+              hint={`${stores.length} total accounts`}
+              tone="green"
+              trendDirection="up"
+            />
+          </div>
         </article>
 
-        <article className="card">
-          <div className="card-header">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
             <div>
-              <h3>Top-performing tenants</h3>
-              <p>Highest-revenue tenant stores in the current workspace</p>
+              <h3>Sales graph</h3>
+              <p>Collections, billing, and outstanding balances over the last 7 days</p>
             </div>
+            <HeaderPill>Last 7 days</HeaderPill>
           </div>
 
-          <div className="list-stack">
-            {dashboard.storePerformance.length ? (
-              dashboard.storePerformance.slice(0, 8).map((store, index) => (
-                <div key={store.store_id} className="list-row">
-                  <div className="list-row-flex">
-                    <span className="rank-badge">#{index + 1}</span>
-                    <div>
-                      <strong>{store.store_name}</strong>
-                      <p>{store.tier} · {store.location}</p>
-                    </div>
-                  </div>
-                  <div className="align-right">
-                    <strong>{currency(store.revenue, currentCurrency)}</strong>
-                    <p>{store.orders} orders</p>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="muted">No tenant activity yet.</p>
-            )}
+          <SimpleLineChart
+            series={analytics.detailed7Days}
+            currencyCode={currentCurrency}
+            lines={[
+              { key: 'collected', label: 'Collected', color: '#37b26c' },
+              { key: 'billed', label: 'Billed', color: '#0e84c3' },
+              { key: 'outstanding', label: 'Outstanding', color: '#e17a38' },
+              { key: 'refunds', label: 'Refunds', color: '#d9485f' },
+            ]}
+          />
+        </article>
+      </div>
+
+      <div className="dashboard-grid dashboard-hero-grid">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
+            <div>
+              <h3>Top rank tenants</h3>
+              <p>Highest performing stores by paid collections</p>
+            </div>
+            <HeaderPill>Ranked</HeaderPill>
+          </div>
+
+          <div className="table-wrap dashboard-rank-table">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Tenant</th>
+                  <th>Tier</th>
+                  <th>Orders</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard.storePerformance.length ? (
+                  dashboard.storePerformance.slice(0, 8).map((store, index) => (
+                    <tr key={store.store_id}>
+                      <td>
+                        <strong>
+                          #{index + 1} · {store.store_name}
+                        </strong>
+                        <span className="muted">{store.location}</span>
+                      </td>
+                      <td>{store.tier}</td>
+                      <td>{store.orders}</td>
+                      <td>{currency(store.revenue, currentCurrency)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} className="catalog-empty-cell">
+                      No tenant activity yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
+            <div>
+              <h3>Stats</h3>
+              <p>High-level commercial performance indicators</p>
+            </div>
+            <HeaderPill>Overview</HeaderPill>
+          </div>
+
+          <div className="stats-grid-retro">
+            <div className="stat-retro-box">
+              <div className="stat-retro-icon tone-yellow">
+                <Gauge size={18} />
+              </div>
+              <div>
+                <strong>{formatPercent(analytics.inventoryHealth)}</strong>
+                <span>Inventory health</span>
+              </div>
+            </div>
+
+            <div className="stat-retro-box">
+              <div className="stat-retro-icon tone-blue">
+                <Wallet size={18} />
+              </div>
+              <div>
+                <strong>{currency(analytics.projectedMonthlyCollections, currentCurrency)}</strong>
+                <span>Projected monthly collections</span>
+              </div>
+            </div>
+
+            <div className="stat-retro-box">
+              <div className="stat-retro-icon tone-blue">
+                <BarChart3 size={18} />
+              </div>
+              <div>
+                <strong>{formatPercent(analytics.collectionRate)}</strong>
+                <span>Collection rate</span>
+              </div>
+            </div>
+
+            <div className="stat-retro-box">
+              <div className="stat-retro-icon tone-yellow">
+                <CreditCard size={18} />
+              </div>
+              <div>
+                <strong>{currency(analytics.averageTicket, currentCurrency)}</strong>
+                <span>Average ticket amount</span>
+              </div>
+            </div>
+
+            <div className="stat-retro-box span-2">
+              <div className="stat-retro-icon tone-blue">
+                <Building2 size={18} />
+              </div>
+              <div>
+                <strong>{analytics.avgOrdersPerTenant.toFixed(1)}</strong>
+                <span>
+                  Avg orders per tenant · {analytics.avgCustomersPerTenant.toFixed(1)} customers
+                  per tenant
+                </span>
+              </div>
+            </div>
           </div>
         </article>
       </div>
 
-      <div className="dashboard-grid">
-        <article className="card">
-          <div className="card-header">
+      <div className="dashboard-grid dashboard-hero-grid">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
             <div>
-              <h3>Active tenants overview</h3>
-              <p>Subscription tier, status, revenue, and operational pressure by tenant</p>
+              <h3>Sale stats</h3>
+              <p>Daily paid collections across the last 7 days</p>
             </div>
+            <HeaderPill>Last 7 days</HeaderPill>
           </div>
 
-          <div className="list-stack">
-            {dashboard.storePerformance.length ? (
-              dashboard.storePerformance.map((store) => (
-                <div key={store.store_id} className="list-row">
-                  <div>
-                    <strong>{store.store_name}</strong>
-                    <p>{store.tier} · {store.status || 'active'}</p>
-                  </div>
-                  <div className="align-right">
-                    <strong>{store.orders} orders</strong>
-                    <p>{store.lowStock} low stock · {store.outstanding} open balances</p>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="muted">No tenant rows yet.</p>
-            )}
-          </div>
+          <MiniBars series={dashboard.last7Days} currencyCode={currentCurrency} />
         </article>
 
-        <article className="card">
-          <div className="card-header">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
+            <div>
+              <h3>Inventory stats</h3>
+              <p>Healthy stock vs items at or below reorder level</p>
+            </div>
+            <HeaderPill>Inventory</HeaderPill>
+          </div>
+
+          <div className="inventory-split">
+            <DonutChart
+              value={analytics.healthyStockCount}
+              total={dashboard.allInventory.length}
+              label="Healthy"
+              sublabel={`${analytics.healthyStockCount} healthy rows · ${analytics.lowStockCount} low stock rows`}
+            />
+
+            <div className="inventory-legend-stack">
+              <div className="inventory-legend-item">
+                <span className="dot good" />
+                <div>
+                  <strong>Healthy inventory</strong>
+                  <p>{analytics.healthyStockCount} rows above reorder level</p>
+                </div>
+              </div>
+
+              <div className="inventory-legend-item">
+                <span className="dot warn" />
+                <div>
+                  <strong>Low stock</strong>
+                  <p>{analytics.lowStockCount} rows need replenishment</p>
+                </div>
+              </div>
+
+              <div className="inventory-legend-item">
+                <span className="dot neutral" />
+                <div>
+                  <strong>Total tracked rows</strong>
+                  <p>{dashboard.allInventory.length} inventory records across stores</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div className="dashboard-grid dashboard-hero-grid">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
             <div>
               <h3>System health & DevOps</h3>
-              <p>Optional live platform telemetry derived from available tenant metadata</p>
+              <p>Optional live platform telemetry derived from tenant metadata</p>
             </div>
+            <HeaderPill>Live</HeaderPill>
           </div>
 
           <div className="health-grid">
@@ -722,65 +1273,63 @@ export default function SuperAdminDashboardPage() {
             />
           </div>
         </article>
-      </div>
 
-      <div className="dashboard-grid">
-        <article className="card">
-          <div className="card-header">
+        <article className="card retro-dashboard-card">
+          <div className="card-header retro-header">
             <div>
-              <h3>M-Pesa / payment gateway status</h3>
-              <p>Operational health of payment processing and callbacks</p>
+              <h3>Useful alerts</h3>
+              <p>Extra items worth monitoring beyond the screenshot layout</p>
             </div>
+            <HeaderPill>Actionable</HeaderPill>
           </div>
 
-          <div className="info-grid">
-            <div className="info-tile compact">
-              <strong>Gateway success rate</strong>
-              <span>
-                {dashboard.platform.systemHealth.gatewaySuccessRate !== null
-                  ? formatPercent(dashboard.platform.systemHealth.gatewaySuccessRate)
-                  : 'Not connected'}
-              </span>
+          <div className="list-stack">
+            <div className="list-row">
+              <div>
+                <strong>Open balances</strong>
+                <p>Billings with unpaid balances across stores</p>
+              </div>
+              <div className="align-right">
+                <strong>{analytics.openBalancesCount}</strong>
+                <p>{currency(analytics.outstandingTotal, currentCurrency)}</p>
+              </div>
             </div>
-            <div className="info-tile compact">
-              <strong>Callback failures</strong>
-              <span>{dashboard.platform.systemHealth.callbackFailures} incidents</span>
-            </div>
-            <div className="info-tile compact">
-              <strong>Open support tickets</strong>
-              <span>{dashboard.platform.systemHealth.supportTickets} active cases</span>
-            </div>
-            <div className="info-tile compact">
-              <strong>Recent system errors</strong>
-              <span>{dashboard.platform.systemHealth.systemErrors} logged events</span>
-            </div>
-          </div>
-        </article>
 
-        <article className="card">
-          <div className="card-header">
-            <div>
-              <h3>Workspace snapshot</h3>
-              <p>Operational summary across the current platform workspace</p>
+            <div className="list-row">
+              <div>
+                <strong>Low stock watch</strong>
+                <p>Inventory rows at or below reorder level</p>
+              </div>
+              <div className="align-right">
+                <strong>{analytics.lowStockCount}</strong>
+                <p>Needs replenishment</p>
+              </div>
             </div>
-          </div>
 
-          <div className="info-grid">
-            <div className="info-tile compact">
-              <strong>Products</strong>
-              <span>{dashboard.products} catalog items</span>
+            <div className="list-row">
+              <div>
+                <strong>Payment gateway incidents</strong>
+                <p>Callback failures, tickets, and recent system errors</p>
+              </div>
+              <div className="align-right">
+                <strong>
+                  {dashboard.platform.systemHealth.callbackFailures +
+                    dashboard.platform.systemHealth.supportTickets +
+                    dashboard.platform.systemHealth.systemErrors}
+                </strong>
+                <p>Total tracked issues</p>
+              </div>
             </div>
-            <div className="info-tile compact">
-              <strong>Customers</strong>
-              <span>{dashboard.customers} saved profiles</span>
-            </div>
-            <div className="info-tile compact">
-              <strong>Users</strong>
-              <span>{dashboard.staff.length} accessible staff accounts</span>
-            </div>
-            <div className="info-tile compact">
-              <strong>Inventory records</strong>
-              <span>{dashboard.allInventory.length} rows across stores</span>
+
+            <div className="list-row">
+              <div>
+                <strong>Average revenue per tenant</strong>
+                <p>Paid collections divided by active tenants</p>
+              </div>
+              <div className="align-right">
+                <strong>{currency(analytics.avgRevenuePerTenant, currentCurrency)}</strong>
+                <p>Per active tenant</p>
+              </div>
             </div>
           </div>
         </article>

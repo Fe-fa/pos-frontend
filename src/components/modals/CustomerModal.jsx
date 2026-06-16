@@ -245,14 +245,14 @@ export default function CustomerModal({
                           <p>Loyalty points</p>
                         </>
                       ) : null}
-                      {customer?.punch_card_count > 0 ? (
+                      {/* {customer?.punch_card_count > 0 ? (
                         <>
                           <strong style={{ color: 'var(--color-text-info)', marginTop: 4 }}>
                             🥊 {customer.punch_card_count} punches
                           </strong>
                           <p>Punch card</p>
                         </>
-                      ) : null}
+                      ) : null} */}
                     </div>
                   </button>
                 </div>
