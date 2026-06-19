@@ -105,7 +105,6 @@ const [perPage, setPerPage] = useState(null);
       setRows(parsed.data.map(normalizeUser));
       setMeta(parsed.meta);
 
-      // Adopt backend's per_page on first load
       if (perPage === null) setPerPage(parsed.meta.per_page);
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to load users.');

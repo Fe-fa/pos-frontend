@@ -10,13 +10,21 @@ import {
   Trash2,
   Download,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { billingService } from '../../services/billingService';
 import { categoryService } from '../../services/categoryService';
 import { customerService } from '../../services/customerService';
 import { productService } from '../../services/productService';
+import { rewardService } from '../../services/rewardService';
 import { currency, formatDateTime } from '../../utils/helpers';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { mergeStoreSettings } from '../../utils/storeSettings';
@@ -24,13 +32,18 @@ import PaymentModal from '../../components/modals/PaymentModal';
 import DraftModal from '../../components/modals/DraftModal';
 import CustomerModal from '../../components/modals/CustomerModal';
 import ProductCard from '../../components/card/ProductCard';
-import { rewardService } from '../../services/rewardService';
 
-const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_DEBOUNCE_MS = 500;
 const PRODUCT_CACHE_TTL_MS = 60_000;
 const CATEGORY_CACHE_TTL_MS = 60_000;
 const FALLBACK_PER_PAGE = 12;
 const DEFAULT_VAT_RATE = 16;
+
+const PRODUCT_GRID_GAP = 16;
+const PRODUCT_GRID_MIN_COL_WIDTH = 220;
+const PRODUCT_CARD_ESTIMATED_HEIGHT = 255; // 👈 Set to ~255 to eliminate the vertical whitespace gap
+const PRODUCT_GRID_OVERSCAN_ROWS = 2;
+const PRODUCT_VIEWPORT_MAX_HEIGHT = 'calc(100vh - 250px)'; // 👈 Fixed the 'pxpx' typo to 'px'
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
 
@@ -70,9 +83,9 @@ const getProductImage = (product) => {
 const getItemTotal = (item) =>
   Number(
     item?.total_amount ??
-    item?.line_total ??
-    item?.line_subtotal ??
-    Number(item?.quantity || 0) * Number(item?.unit_price || 0)
+      item?.line_total ??
+      item?.line_subtotal ??
+      Number(item?.quantity || 0) * Number(item?.unit_price || 0)
   );
 
 const isTypingElement = (target) => {
@@ -179,7 +192,6 @@ const buildLocalItem = (product, quantity = 1, overrides = {}) => {
   };
 };
 
-
 const buildEmptyLocalBilling = () => ({
   billing_id: null,
   invnumber: null,
@@ -219,7 +231,7 @@ const safeSaveCart = (key, payload) => {
     }
     window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
-    /* quota or privacy mode — ignore */
+    /* ignore */
   }
 };
 
@@ -231,15 +243,274 @@ const safeClearCart = (key) => {
   }
 };
 
+/* ----------------------- hooks ----------------------- */
+function useDebouncedValue(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, delay]);
+
+  return debounced;
+}
+
+function useElementSize(ref) {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+
+    const update = () => {
+      setSize({
+        width: el.clientWidth || 0,
+        height: el.clientHeight || 0,
+      });
+    };
+
+    update();
+
+    const observer = new ResizeObserver(() => update());
+    observer.observe(el);
+
+    return () => observer.disconnect();
+  }, [ref]);
+
+  return size;
+}
+
+function useScrollTop(ref) {
+  const [scrollTop, setScrollTop] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+
+    let rafId = 0;
+
+    const onScroll = () => {
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        setScrollTop(el.scrollTop || 0);
+      });
+    };
+
+    el.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      if (rafId) window.cancelAnimationFrame(rafId);
+    };
+  }, [ref]);
+
+  return scrollTop;
+}
+
+/* ----------------------- memoized render blocks ----------------------- */
+const MemoProductCard = memo(function MemoProductCard(props) {
+  return <ProductCard {...props} />;
+});
+
+const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
+  products,
+  productsLoading,
+  resetKey,
+  currentStore,
+  submitting,
+  onPayNow,
+  onAddProduct,
+  currencyFormatter,
+  getProductImageFn,
+}) {
+  const viewportRef = useRef(null);
+  const { width, height } = useElementSize(viewportRef);
+  const scrollTop = useScrollTop(viewportRef);
+
+  useEffect(() => {
+    if (!viewportRef.current) return;
+    viewportRef.current.scrollTop = 0;
+  }, [resetKey]);
+
+const virtualState = useMemo(() => {
+    const safeWidth = Math.max(width, 400); 
+    const columns = 4; 
+    const columnWidth = (safeWidth - PRODUCT_GRID_GAP * (columns - 1)) / columns;
+
+    const totalRows = Math.ceil(products.length / columns);
+    const viewportHeight = Math.max(height || 640, PRODUCT_CARD_ESTIMATED_HEIGHT);
+
+    const startRow = Math.max(
+      0,
+      Math.floor(scrollTop / PRODUCT_CARD_ESTIMATED_HEIGHT) - PRODUCT_GRID_OVERSCAN_ROWS
+    );
+
+    const endRow = Math.min(
+      totalRows,
+      Math.ceil((scrollTop + viewportHeight) / PRODUCT_CARD_ESTIMATED_HEIGHT) +
+        PRODUCT_GRID_OVERSCAN_ROWS
+    );
+
+    const cells = [];
+    for (let row = startRow; row < endRow; row += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const index = row * columns + col;
+        if (index >= products.length) break;
+
+        cells.push({
+          index,
+          item: products[index],
+          style: {
+            position: 'absolute',
+            top: row * PRODUCT_CARD_ESTIMATED_HEIGHT,
+            left: col * (columnWidth + PRODUCT_GRID_GAP),
+            width: columnWidth,
+            height: PRODUCT_CARD_ESTIMATED_HEIGHT - PRODUCT_GRID_GAP,
+          },
+        });
+      }
+    }
+
+    const totalHeight = Math.max(
+      totalRows * PRODUCT_CARD_ESTIMATED_HEIGHT - PRODUCT_GRID_GAP,
+      0
+    );
+
+    return { cells, totalHeight };
+  }, [products, width, height, scrollTop]);
+
+  return (
+<div
+      ref={viewportRef}
+      className="products-viewport"
+      style={{
+        position: 'relative',
+        overflowY: 'auto', // 👈 Keep this so your scroll math works!
+        overflowX: 'hidden',
+        maxHeight: PRODUCT_VIEWPORT_MAX_HEIGHT,
+        minHeight: 360,
+        /* 👇 This masks the top edge while leaving the bottom edge completely open */
+        maskImage: 'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
+        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
+      }}
+    >
+      {productsLoading && !products.length ? (
+        <div className="page-loader" style={{ padding: '24px 0' }}>
+          Loading products...
+        </div>
+      ) : null}
+
+      {!productsLoading && !products.length ? (
+        <div className="card">
+          <p>Empty.</p>
+        </div>
+      ) : null}
+
+      {products.length ? (
+        <div
+          className="products-grid products-grid-enhanced"
+          style={{
+            position: 'relative',
+            height: virtualState.totalHeight,
+            minHeight: 1,
+          }}
+        >
+          {virtualState.cells.map(({ item, index, style }) => (
+            <div
+              key={item.product_id ?? index}
+              className="products-grid-virtual-cell"
+              style={style}
+            >
+              <MemoProductCard
+                product={item}
+                currentStore={currentStore}
+                submitting={submitting}
+                onPayNow={onPayNow}
+                onAddProduct={onAddProduct}
+                currency={currencyFormatter}
+                getProductImage={getProductImageFn}
+              />
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+const BillingItemsList = memo(function BillingItemsList({
+  items,
+  currentStore,
+  onDecrease,
+  onIncrease,
+  onRemove,
+}) {
+  if (!items?.length) {
+    return <p className="muted">Empty billing...hover over a product to add it.</p>;
+  }
+
+  return items.map((item) => (
+    <div className="billing-item-row" key={item.billing_item_id}>
+      <div className="billing-item-info">
+        <strong className="product-name">{item.product?.product_name}</strong>
+        <div className="vat-meta-wrapper">
+          <span className="vat-badge">
+            {item.vat_amount !== undefined && ` +${Number(item.vat_amount).toFixed(2)}`} (VAT)
+          </span>
+        </div>
+      </div>
+
+      <div className="billing-item-actions">
+        <div className="quantity-control">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => onDecrease(item)}
+          >
+            <Minus size={14} />
+          </button>
+
+          <span className="quantity-display">{item.quantity}</span>
+
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => onIncrease(item)}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+
+        <strong className="line-total">
+          {currency(getItemTotal(item), currentStore?.currency)}
+        </strong>
+
+        <button
+          type="button"
+          className="icon-button danger-icon"
+          onClick={() => onRemove(item.billing_item_id)}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+    </div>
+  ));
+});
+
 export default function CashierPosPage() {
   const { user, can } = useAuth();
   const canDraft = can('pos.draft');
   const canVoid = can('pos.void');
-  const canPriceOverride = can('pos.price_override');
   const { stores, storeId, loading: storeLoading } = useStore();
 
-  const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
-  const printSettings = mergeStoreSettings(currentStore);
+  const currentStore = useMemo(
+    () => stores.find((store) => String(store.store_id) === String(storeId)),
+    [stores, storeId]
+  );
+
+  const printSettings = useMemo(() => mergeStoreSettings(currentStore), [currentStore]);
 
   /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
@@ -273,6 +544,8 @@ export default function CashierPosPage() {
   const loadDraftsRef = useRef(null);
   const loadBillingDetailRef = useRef(null);
 
+  const hotkeyContextRef = useRef(null);
+
   /* --- state ---------------------------------------------------------- */
   const [categories, setCategories] = useState([]);
   const [categoryPageInfo, setCategoryPageInfo] = useState(emptyPageInfo());
@@ -282,7 +555,8 @@ export default function CashierPosPage() {
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search.trim(), SEARCH_DEBOUNCE_MS);
+
   const [draftSearch, setDraftSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -292,83 +566,11 @@ export default function CashierPosPage() {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [notes, setNotes] = useState('');
   const [billing, setBilling] = useState(null);
-
-  const [paymentMethod, setPaymentMethod] = useState('');
-  const [amountReceived, setAmountReceived] = useState('');
-  const [amountTendered, setAmountTendered] = useState('');
-  const [mpesaPhone, setMpesaPhone] = useState('');
-  const [mpesaCode, setMpesaCode] = useState('');
-  const [cardReference, setCardReference] = useState('');
-  const [cardHolder, setCardHolder] = useState('');
-
   const [pointsToRedeem, setPointsToRedeem] = useState(0);
   const [loyaltyRule, setLoyaltyRule] = useState(null);
   const [chapa5ClaimedQty, setChapa5ClaimedQty] = useState(0);
+
   const chapa5 = loyaltyRule?.chapa5 ?? null;
-  
-
-const chapa5Preview = useMemo(() => {
-  if (!chapa5?.enabled || !billing?.items?.length) return null;
-
-  const currentPunches = Number(chapa5.current_punches ?? chapa5.progress ?? 0);
-  const buyCount = Number(chapa5.buy_count ?? 5);
-  const freeCount = Number(chapa5.free_count ?? 1);
-
-  // ← Only count PAID items (unit_price > 0), exclude free reward lines
-  const qualifyingQty = billing.items.reduce((sum, it) => {
-    const sku = it.product?.sku || '';
-    const unitPrice = Number(it.unit_price ?? 0);
-    if (chapa5.product_sku && sku !== chapa5.product_sku) return sum;
-    if (unitPrice <= 0) return sum; // ← exclude free/zero-price lines
-    return sum + Number(it.quantity || 0);
-  }, 0);
-
-  const progressAfter = currentPunches + qualifyingQty;
-
-  const previousCycles = Math.floor(currentPunches / buyCount);
-  const newCycles = Math.floor(progressAfter / buyCount);
-  const cyclesCompleted = Math.max(newCycles - previousCycles, 0);
-  const freeItems = cyclesCompleted * freeCount;
-  const unclaimedFreeItems = Math.max(freeItems - chapa5ClaimedQty, 0);
-
-  const displayProgress = progressAfter % buyCount;
-
-  return {
-    enabled: true,
-    label: chapa5.label || `Buy ${buyCount} Get ${freeCount} Free`,
-    product_sku: chapa5.product_sku || null,
-    buy_count: buyCount,
-    free_count: freeCount,
-    current_punches: currentPunches,
-    qualifying_qty: qualifyingQty,
-    progress_after: progressAfter,
-    display_progress: displayProgress,
-    qualifies: freeItems > 0,
-    free_items: freeItems,
-    claimable_free_items: unclaimedFreeItems,
-    already_claimed: chapa5ClaimedQty,
-  };
-}, [chapa5, billing?.items, chapa5ClaimedQty]);
-
-// Auto-adjust free item line when customer reduces mandazi
-useEffect(() => {
-  if (!chapa5Preview) return;
-  const maxFree = chapa5Preview.free_items;
-  if (chapa5ClaimedQty <= maxFree) return;
-
-  const excessFree = chapa5ClaimedQty - maxFree;
-  setChapa5ClaimedQty(maxFree);
-
-  const freeItem = billingRef.current?.items?.find(
-    (it) => Number(it.unit_price) <= 0 &&
-      it.product?.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
-  );
-  if (!freeItem) return;
-
-  const newQty = Number(freeItem.quantity) - excessFree;
-  updateItemQuantity(freeItem, newQty);
-}, [chapa5Preview?.free_items]);
-
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
@@ -385,7 +587,6 @@ useEffect(() => {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [paymentError, setPaymentError] = useState('');
 
   const visibleCategories = categories;
 
@@ -405,9 +606,14 @@ useEffect(() => {
       JSON.stringify({
         storeId: String(storeId || ''),
         categoryScope: effectiveCategoryScopeKey,
-        search: debouncedSearch.trim().toLowerCase(),
+        search: debouncedSearch.toLowerCase(),
       }),
     [storeId, effectiveCategoryScopeKey, debouncedSearch]
+  );
+
+  const productViewportResetKey = useMemo(
+    () => `${productPageInfo.currentPage}::${currentFilterSignature}`,
+    [productPageInfo.currentPage, currentFilterSignature]
   );
 
   const canPrevCategory = categoryPageInfo.hasPrevPage;
@@ -426,7 +632,7 @@ useEffect(() => {
       storeId: String(storeId || ''),
       activeCategoryId,
       scopeKey: effectiveCategoryScopeKey,
-      search: debouncedSearch.trim().toLowerCase(),
+      search: debouncedSearch,
     };
   }, [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]);
 
@@ -459,12 +665,12 @@ useEffect(() => {
           product_id: it.product_id,
           product: it.product
             ? {
-              product_id: it.product.product_id,
-              product_name: it.product.product_name,
-              sku: it.product.sku,
-              price: it.product.price,
-              vat_rate: it.product.vat_rate,
-            }
+                product_id: it.product.product_id,
+                product_name: it.product.product_name,
+                sku: it.product.sku,
+                price: it.product.price,
+                vat_rate: it.product.vat_rate,
+              }
             : null,
           quantity: it.quantity,
           unit_price: it.unit_price,
@@ -482,12 +688,52 @@ useEffect(() => {
     safeSaveCart(key, snapshot);
   }, [billing, selectedCustomerId, notes, storeId, user?.user_id]);
 
+  const chapa5Preview = useMemo(() => {
+    if (!chapa5?.enabled || !billing?.items?.length) return null;
+
+    const currentPunches = Number(chapa5.current_punches ?? chapa5.progress ?? 0);
+    const buyCount = Number(chapa5.buy_count ?? 5);
+    const freeCount = Number(chapa5.free_count ?? 1);
+
+    const qualifyingQty = billing.items.reduce((sum, it) => {
+      const sku = it.product?.sku || '';
+      const unitPrice = Number(it.unit_price ?? 0);
+      if (chapa5.product_sku && sku !== chapa5.product_sku) return sum;
+      if (unitPrice <= 0) return sum;
+      return sum + Number(it.quantity || 0);
+    }, 0);
+
+    const progressAfter = currentPunches + qualifyingQty;
+    const previousCycles = Math.floor(currentPunches / buyCount);
+    const newCycles = Math.floor(progressAfter / buyCount);
+    const cyclesCompleted = Math.max(newCycles - previousCycles, 0);
+    const freeItems = cyclesCompleted * freeCount;
+    const unclaimedFreeItems = Math.max(freeItems - chapa5ClaimedQty, 0);
+    const displayProgress = progressAfter % buyCount;
+
+    return {
+      enabled: true,
+      label: chapa5.label || `Buy ${buyCount} Get ${freeCount} Free`,
+      product_sku: chapa5.product_sku || null,
+      buy_count: buyCount,
+      free_count: freeCount,
+      current_punches: currentPunches,
+      qualifying_qty: qualifyingQty,
+      progress_after: progressAfter,
+      display_progress: displayProgress,
+      qualifies: freeItems > 0,
+      free_items: freeItems,
+      claimable_free_items: unclaimedFreeItems,
+      already_claimed: chapa5ClaimedQty,
+    };
+  }, [chapa5, billing?.items, chapa5ClaimedQty]);
+
   /* =====================================================================
      SYNC QUEUE
      ===================================================================== */
   const enqueueSync = useCallback((task) => {
     const next = syncQueueRef.current.then(task, task);
-    syncQueueRef.current = next.catch(() => { });
+    syncQueueRef.current = next.catch(() => {});
     return next;
   }, []);
 
@@ -511,27 +757,16 @@ useEffect(() => {
     [user]
   );
 
-  const resetPaymentState = useCallback((total = '') => {
-    setPaymentMethod('');
-    setAmountReceived(total ? String(total) : '');
-    setAmountTendered('');
-    setMpesaPhone('');
-    setMpesaCode('');
-    setCardReference('');
-    setCardHolder('');
-  }, []);
-
   const resetSale = useCallback(() => {
     setBilling(null);
     setSelectedCustomerId('');
     setSelectedCustomer(null);
     setNotes('');
-    setChapa5ClaimedQty(0);  // ← was setChapa5Claimed(false)
-    resetPaymentState('');
+    setChapa5ClaimedQty(0);
     setShowPaymentModal(false);
     setShowCustomerModal(false);
     safeClearCart(cartStorageKeyRef.current);
-  }, [resetPaymentState]);
+  }, []);
 
   const resetProductState = useCallback(() => {
     setProducts([]);
@@ -565,12 +800,12 @@ useEffect(() => {
     setDrafts((prev) => prev.filter((item) => String(item.billing_id) !== String(billingId)));
   }, []);
 
-  const deleteBillingRecord = async (billingId) => {
+  const deleteBillingRecord = useCallback(async (billingId) => {
     if (typeof billingService.destroy === 'function') return billingService.destroy(billingId);
     if (typeof billingService.delete === 'function') return billingService.delete(billingId);
     if (typeof billingService.remove === 'function') return billingService.remove(billingId);
     throw new Error('Delete billing method is not implemented in billingService.');
-  };
+  }, []);
 
   /* =====================================================================
      CATEGORY PAGE FETCHING
@@ -660,7 +895,8 @@ useEffect(() => {
     } catch (err) {
       console.error('POS catalog load failed:', err);
       setError(
-        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'
+        `Failed to load catalog: ${
+          err?.response?.data?.message || err?.message || 'Network Error'
         }`
       );
       return { categories: [], categoryPageInfo: emptyPageInfo() };
@@ -684,14 +920,14 @@ useEffect(() => {
         page: Number(page || 1),
         categoryScope: scopeKey,
         categoryId: categoryId ?? '',
-        search: searchValue,
+        search: String(searchValue || '').trim().toLowerCase(),
       }),
     []
   );
 
   const fetchProductsPage = useCallback(
     async (page, categoryId = productFiltersRef.current.activeCategoryId) => {
-      const { storeId: sid, search } = productFiltersRef.current;
+      const { storeId: sid, search: searchTerm } = productFiltersRef.current;
 
       const params = {
         store_id: Number(sid),
@@ -701,7 +937,7 @@ useEffect(() => {
 
       if (categoryId != null) params.category_id = categoryId;
 
-      const normalizedSearch = search.trim();
+      const normalizedSearch = String(searchTerm || '').trim();
       if (normalizedSearch) params.search = normalizedSearch;
 
       const response = await productService.list(params);
@@ -833,7 +1069,7 @@ useEffect(() => {
   loadBillingDetailRef.current = loadBillingDetail;
 
   /* =====================================================================
-     SELECTED CUSTOMER DETAIL LOAD (lazy)
+     SELECTED CUSTOMER DETAIL LOAD
      ===================================================================== */
   useEffect(() => {
     let cancelled = false;
@@ -845,7 +1081,6 @@ useEffect(() => {
       };
     }
 
-    // If we already have the matching customer, no need to refetch.
     if (
       selectedCustomer &&
       String(getCustomerId(selectedCustomer)) === String(selectedCustomerId)
@@ -873,34 +1108,28 @@ useEffect(() => {
     };
   }, [selectedCustomerId, selectedCustomer]);
 
-useEffect(() => {
-  if (!selectedCustomerId || !storeId) {
-    setLoyaltyRule(null);
-    return;
-  }
-
-  rewardService
-    .customerLoyalty({
-      store_id: Number(storeId),
-      customer_id: Number(selectedCustomerId),
-    })
-    .then((data) => {
-      setLoyaltyRule(data || null);
-    })
-    .catch(() => {
+  useEffect(() => {
+    if (!selectedCustomerId || !storeId) {
       setLoyaltyRule(null);
-    });
-}, [selectedCustomerId, storeId]);
+      return;
+    }
 
+    rewardService
+      .customerLoyalty({
+        store_id: Number(storeId),
+        customer_id: Number(selectedCustomerId),
+      })
+      .then((data) => {
+        setLoyaltyRule(data || null);
+      })
+      .catch(() => {
+        setLoyaltyRule(null);
+      });
+  }, [selectedCustomerId, storeId]);
 
   /* =====================================================================
      EFFECTS
      ===================================================================== */
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [search]);
-
   useEffect(() => {
     if (!success) return;
     const timer = setTimeout(() => setSuccess(''), 3000);
@@ -932,7 +1161,6 @@ useEffect(() => {
     setSuccess('');
     setDrafts([]);
     setSearch('');
-    setDebouncedSearch('');
     setDraftSearch('');
     setActiveCategory('all');
 
@@ -959,10 +1187,8 @@ useEffect(() => {
           search: '',
         };
 
-        const response = productsResponse;
-
-        const meta = extractMeta(response);
-        const items = extractList(response);
+        const meta = extractMeta(productsResponse);
+        const items = extractList(productsResponse);
         const pageInfo = buildPageInfo(meta, items, 1);
 
         const cacheKey = JSON.stringify({
@@ -1092,6 +1318,100 @@ useEffect(() => {
     });
   }, []);
 
+  const removeItem = useCallback(
+    (billingItemId) => {
+      if (!billingItemId) return;
+      setError('');
+
+      let removedItemSnapshot = null;
+
+      applyBillingMutation((draft) => {
+        removedItemSnapshot = draft.items.find(
+          (it) => String(it.billing_item_id) === String(billingItemId)
+        );
+        draft.items = draft.items.filter(
+          (it) => String(it.billing_item_id) !== String(billingItemId)
+        );
+        return draft;
+      });
+
+      const current = billingRef.current;
+      if (!current?.billing_id || !removedItemSnapshot || removedItemSnapshot.__local) return;
+
+      enqueueSync(async () => {
+        try {
+          await billingService.removeItem(billingItemId);
+        } catch (err) {
+          setError(
+            err?.response?.data?.message || err?.message || 'Background sync failed (remove).'
+          );
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync]
+  );
+
+  const updateItemQuantity = useCallback(
+    (item, nextQuantity) => {
+      if (!item) return;
+      if (nextQuantity < 1) return removeItem(item.billing_item_id);
+
+      const targetId = item.billing_item_id;
+      setError('');
+
+      applyBillingMutation((draft) => {
+        const target = draft.items.find(
+          (it) => String(it.billing_item_id) === String(targetId)
+        );
+        if (!target) return draft;
+
+        const totals = calcLineFromGross(
+          nextQuantity,
+          target.unit_price,
+          target.vat_rate ?? DEFAULT_VAT_RATE
+        );
+        Object.assign(target, { quantity: nextQuantity, ...totals });
+        return draft;
+      });
+
+      const current = billingRef.current;
+      if (!current?.billing_id || item.__local) return;
+
+      enqueueSync(async () => {
+        try {
+          await billingService.updateItem(item.billing_item_id, {
+            quantity: nextQuantity,
+            unit_price: item.unit_price,
+          });
+        } catch (err) {
+          setError(
+            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
+          );
+        }
+      });
+    },
+    [applyBillingMutation, enqueueSync, removeItem]
+  );
+
+  useEffect(() => {
+    if (!chapa5Preview) return;
+    const maxFree = chapa5Preview.free_items;
+    if (chapa5ClaimedQty <= maxFree) return;
+
+    const excessFree = chapa5ClaimedQty - maxFree;
+    setChapa5ClaimedQty(maxFree);
+
+    const freeItem = billingRef.current?.items?.find(
+      (it) =>
+        Number(it.unit_price) <= 0 &&
+        it.product?.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+    );
+    if (!freeItem) return;
+
+    const newQty = Number(freeItem.quantity) - excessFree;
+    updateItemQuantity(freeItem, newQty);
+  }, [chapa5Preview, chapa5ClaimedQty, updateItemQuantity]);
+
   const handleAddProduct = useCallback(
     (product) => {
       if (!product?.product_id) return;
@@ -1170,117 +1490,33 @@ useEffect(() => {
     [applyBillingMutation, enqueueSync]
   );
 
-  const handleAddProductAsync = useCallback(
-  (product, overrides = {}) => {
-    return new Promise((resolve) => {
-      if (!product?.product_id) return resolve();
-      applyBillingMutation((draft) => {
-        const local = buildLocalItem(product, 1, overrides);
-        draft.items.push(local);
-        return draft;
-      });
-      resolve();
-    });
-  },
-  [applyBillingMutation]
-);
-
-  const removeItem = useCallback(
-    (billingItemId) => {
-      if (!billingItemId) return;
-      setError('');
-
-      let removedItemSnapshot = null;
-
-      applyBillingMutation((draft) => {
-        removedItemSnapshot = draft.items.find(
-          (it) => String(it.billing_item_id) === String(billingItemId)
-        );
-        draft.items = draft.items.filter(
-          (it) => String(it.billing_item_id) !== String(billingItemId)
-        );
-        return draft;
-      });
-
-      const current = billingRef.current;
-      if (!current?.billing_id || !removedItemSnapshot || removedItemSnapshot.__local) return;
-
-      enqueueSync(async () => {
-        try {
-          await billingService.removeItem(billingItemId);
-        } catch (err) {
-          setError(
-            err?.response?.data?.message || err?.message || 'Background sync failed (remove).'
-          );
-        }
-      });
-    },
-    [applyBillingMutation, enqueueSync]
-  );
-
-  const updateItemQuantity = useCallback(
-    (item, nextQuantity) => {
-      if (!item) return;
-      if (nextQuantity < 1) return removeItem(item.billing_item_id);
-
-      const targetId = item.billing_item_id;
-      setError('');
-
-      applyBillingMutation((draft) => {
-        const target = draft.items.find(
-          (it) => String(it.billing_item_id) === String(targetId)
-        );
-        if (!target) return draft;
-
-        const totals = calcLineFromGross(
-          nextQuantity,
-          target.unit_price,
-          target.vat_rate ?? DEFAULT_VAT_RATE
-        );
-        Object.assign(target, { quantity: nextQuantity, ...totals });
-        return draft;
-      });
-
-      const current = billingRef.current;
-      if (!current?.billing_id || item.__local) return;
-
-      enqueueSync(async () => {
-        try {
-          await billingService.updateItem(item.billing_item_id, {
-            quantity: nextQuantity,
-            unit_price: item.unit_price,
-          });
-        } catch (err) {
-          setError(
-            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
-          );
-        }
-      });
-    },
-    [applyBillingMutation, enqueueSync, removeItem]
-  );
-
   const handlePayNow = useCallback(
     (product) => {
       handleAddProduct(product);
-      window.requestAnimationFrame(() => {
-        const next = billingRef.current;
-        resetPaymentState(next?.total || product.price || '');
-        setShowPaymentModal(true);
-      });
+      window.requestAnimationFrame(() => setShowPaymentModal(true));
     },
-    [handleAddProduct, resetPaymentState]
+    [handleAddProduct]
+  );
+
+  const handleIncreaseItem = useCallback(
+    (item) => updateItemQuantity(item, Number(item.quantity) + 1),
+    [updateItemQuantity]
+  );
+
+  const handleDecreaseItem = useCallback(
+    (item) => updateItemQuantity(item, Number(item.quantity) - 1),
+    [updateItemQuantity]
   );
 
   /* =====================================================================
      DRAFT PROMOTION / PAYMENT
      ===================================================================== */
-  const promoteLocalCartToServerDraft = async () => {
+  const promoteLocalCartToServerDraft = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.items?.length) return null;
     if (current.billing_id) return current;
 
-    await syncQueueRef.current.catch(() => { });
+    await syncQueueRef.current.catch(() => {});
 
     const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
@@ -1305,9 +1541,9 @@ useEffect(() => {
 
     const detail = await loadBillingDetail(newId, { silent: true });
     return detail || created;
-  };
+  }, [storeId, selectedCustomerId, notes, loadBillingDetail]);
 
-  const persistDraftHeader = async () => {
+  const persistDraftHeader = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.billing_id) return null;
 
@@ -1319,31 +1555,9 @@ useEffect(() => {
     const updatedBilling = await loadBillingDetail(current.billing_id, { silent: true });
     mergeDraftPreview(updatedBilling);
     return updatedBilling;
-  };
-// REPLACE the existing openPaymentModalForBilling with this:
-const openPaymentModalForBilling = (billingData) => {
-  const outstandingBalance = Number(
-    selectedCustomer?.current_balance ??
-    selectedCustomer?.balance ??
-    selectedCustomer?.opening_balance ??
-    0
-  );
+  }, [selectedCustomerId, notes, loadBillingDetail, mergeDraftPreview]);
 
-  const invoiceTotal = Number(billingData?.total || 0);
-  const loyaltyPointValue = loyaltyRule?.active_rule?.point_value ?? 1;
-  const loyaltyDiscount = Math.max(
-    0,
-    Math.min(invoiceTotal, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
-  );
-  const discountedTotal = Math.max(invoiceTotal - loyaltyDiscount, 0);
-  const payableNow = discountedTotal + outstandingBalance;
-
-  resetPaymentState(payableNow ? String(payableNow) : '');
-  setShowPaymentModal(true);
-};
-
-
-  const handleSaveOrUpdateDraft = async () => {
+  const handleSaveOrUpdateDraft = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.items?.length) return;
     setError('');
@@ -1371,159 +1585,131 @@ const openPaymentModalForBilling = (billingData) => {
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [mergeDraftPreview, persistDraftHeader, promoteLocalCartToServerDraft, resetSale]);
 
-  const handleProceedToPayment = async () => {
+  const handleProceedToPayment = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.items?.length) return;
     setError('');
     setSubmitting(true);
 
     try {
-      let target = current;
-      if (!current.billing_id) {
-        target = await promoteLocalCartToServerDraft();
-      } else {
-        target = (await persistDraftHeader()) || current;
-      }
-      openPaymentModalForBilling(target);
+      if (!current.billing_id) await promoteLocalCartToServerDraft();
+      else await persistDraftHeader();
+      setShowPaymentModal(true);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to open payment.');
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [persistDraftHeader, promoteLocalCartToServerDraft]);
 
-  const handlePaymentMethodChange = (method) => {
-    setPaymentMethod(method);
-    setError('');
-    if (method !== 'cash') setAmountTendered('');
-  };
-
-const validatePayment = () => {
-  if (!paymentMethod) {
-    setPaymentError('Please select a payment method.');
-    return false;
-  }
-  if (!amountReceived || Number(amountReceived) <= 0) {
-    setPaymentError('Please enter a valid amount received.');
-    return false;
-  }
-  if (paymentMethod === 'cash' && (!amountTendered || Number(amountTendered) <= 0)) {
-    setPaymentError('Please enter the cash received amount.');
-    return false;
-  }
-  if (paymentMethod === 'mpesa') {
-    if (!mpesaPhone.trim()) {
-      setPaymentError('Please enter MPESA phone number.');
-      return false;
-    }
-    if (!mpesaCode.trim()) {
-      setPaymentError('Please enter MPESA transaction code.');
-      return false;
-    }
-  }
-  if (paymentMethod === 'card' && !cardReference.trim()) {
-    setPaymentError('Please enter card reference.');
-    return false;
-  }
-  return true;
-};
-
-const handleCharge = async () => {
-  const current = billingRef.current;
-  if (!current?.items?.length) return;
-  setPaymentError('');
-  if (!validatePayment()) return;
-
-  if (current.status === 'paid') {
-    setShowPaymentModal(false);
-    return;
-  }
-
-  setSubmitting(true);
-  setSuccess('');
-
-  try {
-    let target = current;
-    if (!current.billing_id) target = await promoteLocalCartToServerDraft();
-    else target = (await persistDraftHeader()) || current;
-
-    await billingService.charge(target.billing_id, {
-      payment_method: paymentMethod,
-      amount_received: Number(amountReceived || 0),
-      amount_tendered:
-        paymentMethod === 'cash'
-          ? Number(amountTendered || amountReceived || 0)
-          : Number(amountReceived || 0),
-      points_redeemed: Number(pointsToRedeem || 0),
-      mpesa_phone: paymentMethod === 'mpesa' ? mpesaPhone : null,
-      mpesa_code: paymentMethod === 'mpesa' ? mpesaCode : null,
-      card_reference: paymentMethod === 'card' ? cardReference : null,
-      card_holder: paymentMethod === 'card' ? cardHolder || null : null,
-    });
-
-    const paidResponse = await billingService.show(target.billing_id);
-    const paidBilling = paidResponse?.data || paidResponse;
-
-    const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
-    openBillingPrint(paidBilling, currentStore, printMode, printSettings);
-
-    removeDraftPreview(target.billing_id);
-    resetSale();
-    setPointsToRedeem(0);
-    setShowPaymentModal(false);
-    setSuccess('Payment processed successfully.');
-    focusSearchInput(true);
-  } catch (err) {
-    setPaymentError(err?.response?.data?.message || err?.message || 'Unable to process payment.');
-  } finally {
-    setSubmitting(false);
-  }
-};
-
-  const handleLoadDraft = async (draftId) => {
-    setError('');
-    setSubmitting(true);
-
-    try {
-      safeClearCart(cartStorageKeyRef.current);
-      await loadBillingDetail(draftId);
-      setShowDraftModal(false);
-      setShowPaymentModal(false);
-      focusSearchInput(true);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to load draft.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleDeleteDraft = async (draftId) => {
-    const confirmed = window.confirm('Move this draft to trash?');
-    if (!confirmed) return;
-
-    setError('');
-    setSubmitting(true);
-
-    try {
-      await deleteBillingRecord(draftId);
+  const handleCharge = useCallback(
+    async (paymentDetails) => {
       const current = billingRef.current;
-      if (String(current?.billing_id) === String(draftId)) resetSale();
-      removeDraftPreview(draftId);
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to delete draft.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+      if (!current?.items?.length) return;
+      if (current.status === 'paid') {
+        setShowPaymentModal(false);
+        return;
+      }
+
+      setSubmitting(true);
+      setSuccess('');
+
+      try {
+        let target = current;
+        if (!current.billing_id) target = await promoteLocalCartToServerDraft();
+        else target = (await persistDraftHeader()) || current;
+
+        await billingService.charge(target.billing_id, {
+          payment_method: paymentDetails.paymentMethod,
+          amount_received: paymentDetails.amountReceived,
+          amount_tendered: paymentDetails.amountTendered,
+          points_redeemed: paymentDetails.pointsToRedeem,
+          mpesa_phone: paymentDetails.mpesaPhone,
+          mpesa_code: paymentDetails.mpesaCode,
+          card_reference: paymentDetails.cardReference,
+          card_holder: paymentDetails.cardHolder,
+        });
+
+        const paidResponse = await billingService.show(target.billing_id);
+        const paidBilling = paidResponse?.data || paidResponse;
+        const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
+        openBillingPrint(paidBilling, currentStore, printMode, printSettings);
+
+        removeDraftPreview(target.billing_id);
+        resetSale();
+        setPointsToRedeem(0);
+        setShowPaymentModal(false);
+        setSuccess('Payment processed successfully.');
+        focusSearchInput(true);
+      } catch (err) {
+        throw new Error(
+          err?.response?.data?.message || err?.message || 'Unable to process payment.'
+        );
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [
+      currentStore,
+      focusSearchInput,
+      persistDraftHeader,
+      printSettings,
+      promoteLocalCartToServerDraft,
+      removeDraftPreview,
+      resetSale,
+    ]
+  );
+
+  const handleLoadDraft = useCallback(
+    async (draftId) => {
+      setError('');
+      setSubmitting(true);
+
+      try {
+        safeClearCart(cartStorageKeyRef.current);
+        await loadBillingDetail(draftId);
+        setShowDraftModal(false);
+        setShowPaymentModal(false);
+        focusSearchInput(true);
+      } catch (err) {
+        setError(err?.response?.data?.message || err?.message || 'Unable to load draft.');
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [focusSearchInput, loadBillingDetail]
+  );
+
+  const handleDeleteDraft = useCallback(
+    async (draftId) => {
+      const confirmed = window.confirm('Move this draft to trash?');
+      if (!confirmed) return;
+
+      setError('');
+      setSubmitting(true);
+
+      try {
+        await deleteBillingRecord(draftId);
+        const current = billingRef.current;
+        if (String(current?.billing_id) === String(draftId)) resetSale();
+        removeDraftPreview(draftId);
+      } catch (err) {
+        setError(err?.response?.data?.message || err?.message || 'Unable to delete draft.');
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [deleteBillingRecord, removeDraftPreview, resetSale]
+  );
 
   const handleCustomerSelect = useCallback((customerId, customerObject = null) => {
     setSelectedCustomerId(customerId);
     if (customerObject) {
-      setSelectedCustomer(customerObject); // ← set instantly, no fetch needed
+      setSelectedCustomer(customerObject);
     } else {
-      setSelectedCustomer(null); // ← walk-in customer
+      setSelectedCustomer(null);
     }
     setShowCustomerModal(false);
   }, []);
@@ -1573,66 +1759,76 @@ const handleCharge = async () => {
       setSubmitting(false);
     }
   }, [
+    deleteBillingRecord,
+    focusSearchInput,
+    removeDraftPreview,
+    resetSale,
+    search,
+    showCustomerModal,
+    showDraftModal,
+    showPaymentModal,
+    submitting,
+  ]);
+
+  const handleClaimChapa5Reward = useCallback(async () => {
+    if (!chapa5Preview?.claimable_free_items || !chapa5Preview?.product_sku) return;
+
+    const itemsToAdd = chapa5Preview.claimable_free_items;
+
+    setError('');
+    setSubmitting(true);
+
+    try {
+      const freeProduct = products.find(
+        (p) => p.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+      );
+
+      if (!freeProduct) {
+        setError('Free item product not found in catalog.');
+        return;
+      }
+
+      let target = billingRef.current;
+      if (!target?.billing_id) {
+        target = await promoteLocalCartToServerDraft();
+      } else {
+        target = (await persistDraftHeader()) || target;
+      }
+
+      if (!target?.billing_id) {
+        setError('Unable to save cart before claiming reward.');
+        return;
+      }
+
+      await billingService.addItem(target.billing_id, {
+        product_id: freeProduct.product_id,
+        quantity: itemsToAdd,
+        unit_price: 0,
+      });
+
+      setChapa5ClaimedQty((prev) => prev + itemsToAdd);
+      await loadBillingDetail(target.billing_id, { silent: true });
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || 'Failed to add free item.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [chapa5Preview, products, promoteLocalCartToServerDraft, persistDraftHeader, loadBillingDetail]);
+
+  hotkeyContextRef.current = {
     submitting,
     showPaymentModal,
     showDraftModal,
     showCustomerModal,
-    search,
-    focusSearchInput,
-    removeDraftPreview,
-    resetSale,
-  ]);
+    canDraft,
+    handleSaveOrUpdateDraft,
+    handleEscapeShortcut,
+    handleProceedToPayment,
+  };
 
-const handleClaimChapa5Reward = useCallback(async () => {
-  if (!chapa5Preview?.claimable_free_items || !chapa5Preview?.product_sku) return;
-
-  const itemsToAdd = chapa5Preview.claimable_free_items; // only unclaimed ones
-
-  setError('');
-  setSubmitting(true);
-
-  try {
-    const freeProduct = products.find(
-      (p) => p.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
-    );
-
-    if (!freeProduct) {
-      setError('Free item product not found in catalog.');
-      return;
-    }
-
-    let target = billingRef.current;
-    if (!target?.billing_id) {
-      target = await promoteLocalCartToServerDraft();
-    } else {
-      target = (await persistDraftHeader()) || target;
-    }
-
-    if (!target?.billing_id) {
-      setError('Unable to save cart before claiming reward.');
-      return;
-    }
-
-    // Backend will increment existing free line if one exists
-    await billingService.addItem(target.billing_id, {
-      product_id: freeProduct.product_id,
-      quantity: itemsToAdd,
-      unit_price: 0,
-    });
-
-    setChapa5ClaimedQty((prev) => prev + itemsToAdd);
-    await loadBillingDetail(target.billing_id, { silent: true });
-
-  } catch (err) {
-    setError(err?.response?.data?.message || err?.message || 'Failed to add free item.');
-  } finally {
-    setSubmitting(false);
-  }
-}, [chapa5Preview, products, billingRef, promoteLocalCartToServerDraft, persistDraftHeader, loadBillingDetail]);
-
-  /* ----- global hotkeys ---------------------------------------------- */
   useEffect(() => {
     const handleGlobalKeyDown = (event) => {
+      const ctx = hotkeyContextRef.current;
       const blockedTarget = isHotkeyBlockedElement(event.target);
       const typingTarget = isTypingElement(event.target);
 
@@ -1644,15 +1840,15 @@ const handleClaimChapa5Reward = useCallback(async () => {
 
       if (event.key === 'F8') {
         event.preventDefault();
-        if (!submitting && billingRef.current?.items?.length && canDraft) {
-          void handleSaveOrUpdateDraft();
+        if (!ctx.submitting && billingRef.current?.items?.length && ctx.canDraft) {
+          void ctx.handleSaveOrUpdateDraft();
         }
         return;
       }
 
       if (event.key === 'Escape') {
         event.preventDefault();
-        void handleEscapeShortcut();
+        void ctx.handleEscapeShortcut();
         return;
       }
 
@@ -1660,32 +1856,27 @@ const handleClaimChapa5Reward = useCallback(async () => {
         (event.code === 'Space' || event.key === ' ' || event.key === 'Enter') &&
         !blockedTarget &&
         !typingTarget &&
-        !showPaymentModal &&
-        !showDraftModal &&
-        !showCustomerModal;
+        !ctx.showPaymentModal &&
+        !ctx.showDraftModal &&
+        !ctx.showCustomerModal;
 
-      if (wantsCheckout && !submitting && billingRef.current?.items?.length) {
+      if (wantsCheckout && !ctx.submitting && billingRef.current?.items?.length) {
         event.preventDefault();
-        void handleProceedToPayment();
+        void ctx.handleProceedToPayment();
       }
     };
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [
-    submitting,
-    showPaymentModal,
-    showDraftModal,
-    showCustomerModal,
-    focusSearchInput,
-    handleEscapeShortcut,
-  ]);
+  }, [focusSearchInput]);
 
   /* =====================================================================
      DERIVED RENDER VALUES
      ===================================================================== */
-  const itemCount =
-    billing?.items?.reduce((sum, item) => sum + Number(item.quantity || 0), 0) || 0;
+  const itemCount = useMemo(
+    () => billing?.items?.reduce((sum, item) => sum + Number(item.quantity || 0), 0) || 0,
+    [billing?.items]
+  );
 
   const filteredDrafts = useMemo(() => {
     const keyword = draftSearch.trim().toLowerCase();
@@ -1709,55 +1900,44 @@ const handleClaimChapa5Reward = useCallback(async () => {
     });
   }, [drafts, draftSearch]);
 
-const customerCurrentBalance = Number(
-  billing?.customer?.current_balance ??
-  selectedCustomer?.current_balance ??
-  selectedCustomer?.balance ??
-  selectedCustomer?.opening_balance ??
-  0
-);
-// ↓ ADD HERE — keeps "Amount to be paid" in sync when cashier adjusts points
-useEffect(() => {
-  if (!showPaymentModal) return;
-
-  const invoiceAmount = Number(billing?.total || 0);
-  const loyaltyPointValue = loyaltyRule?.active_rule?.point_value ?? 1;
-  const loyaltyDiscount = Math.max(
-    0,
-    Math.min(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
+  const customerCurrentBalance = useMemo(
+    () =>
+      Number(
+        billing?.customer?.current_balance ??
+          selectedCustomer?.current_balance ??
+          selectedCustomer?.balance ??
+          selectedCustomer?.opening_balance ??
+          0
+      ),
+    [billing?.customer, selectedCustomer]
   );
-  const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
-  const combinedPayable = discountedInvoiceAmount + customerCurrentBalance;
-
-  setAmountReceived(combinedPayable > 0 ? String(combinedPayable) : '');
-}, [pointsToRedeem, showPaymentModal]);
 
   /* =====================================================================
      PAGINATION HANDLERS
      ===================================================================== */
-  const goToPreviousPage = () => {
+  const goToPreviousPage = useCallback(() => {
     if (productsLoading) return;
     const prevPage = productPageInfo.currentPage - 1;
     if (prevPage < 1) return;
     setCurrentPage(prevPage);
-  };
+  }, [productPageInfo.currentPage, productsLoading]);
 
-  const goToNextPage = () => {
+  const goToNextPage = useCallback(() => {
     if (productsLoading) return;
     const nextPage = productPageInfo.currentPage + 1;
     if (nextPage > productPageInfo.lastPage) return;
     setCurrentPage(nextPage);
-  };
+  }, [productPageInfo.currentPage, productPageInfo.lastPage, productsLoading]);
 
-  const goToPrevCategoryPage = async () => {
+  const goToPrevCategoryPage = useCallback(async () => {
     if (!canPrevCategory || categoriesLoading) return;
     await loadCategoriesPage(categoryPageInfo.currentPage - 1);
-  };
+  }, [canPrevCategory, categoriesLoading, loadCategoriesPage, categoryPageInfo.currentPage]);
 
-  const goToNextCategoryPage = async () => {
+  const goToNextCategoryPage = useCallback(async () => {
     if (!canNextCategory || categoriesLoading) return;
     await loadCategoriesPage(categoryPageInfo.currentPage + 1);
-  };
+  }, [canNextCategory, categoriesLoading, loadCategoriesPage, categoryPageInfo.currentPage]);
 
   /* =====================================================================
      EARLY RETURNS
@@ -1903,28 +2083,21 @@ useEffect(() => {
             <>
               {error ? <div className="form-error">{error}</div> : null}
               {success ? <div className="form-success">{success}</div> : null}
-              {productsLoading ? <div className="page-loader">Loading products...</div> : null}
+              {productsLoading && products.length ? (
+                <div className="inline-note-spinner">Refreshing products...</div>
+              ) : null}
 
-              <div className="products-grid products-grid-enhanced">
-                {products.map((product) => (
-                  <ProductCard
-                    key={product.product_id}
-                    product={product}
-                    currentStore={currentStore}
-                    submitting={submitting}
-                    onPayNow={handlePayNow}
-                    onAddProduct={handleAddProduct}
-                    currency={currency}
-                    getProductImage={getProductImage}
-                  />
-                ))}
-
-                {!productsLoading && !products.length ? (
-                  <div className="card">
-                    <p>Empty.</p>
-                  </div>
-                ) : null}
-              </div>
+              <VirtualizedProductGrid
+                products={products}
+                productsLoading={productsLoading}
+                resetKey={productViewportResetKey}
+                currentStore={currentStore}
+                submitting={submitting}
+                onPayNow={handlePayNow}
+                onAddProduct={handleAddProduct}
+                currencyFormatter={currency}
+                getProductImageFn={getProductImage}
+              />
 
               {products.length > 0 ? (
                 <div className="pagination-bar">
@@ -1975,7 +2148,7 @@ useEffect(() => {
                 <p className="invoice-subtext">
                   {billing
                     ? billing.invnumber ||
-                    (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
                     : 'No active billing yet'}
                 </p>
               </div>
@@ -2004,7 +2177,6 @@ useEffect(() => {
                       Change
                     </button>
 
-                    {/* ← gate this one too */}
                     {canDraft && (
                       <button
                         type="button"
@@ -2034,6 +2206,7 @@ useEffect(() => {
                     >
                       Select Customer
                     </button>
+
                     {canDraft && (
                       <button
                         type="button"
@@ -2063,11 +2236,11 @@ useEffect(() => {
                 <h3>Billing items</h3>
                 {billingLoading ? <p>Refreshing billing...</p> : null}
               </div>
-              <div
+
+                            <div
                 className="header-action-icons-row"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
               >
-                {/* Save Draft — only if user has pos.draft permission */}
                 {canDraft && (
                   <button
                     type="button"
@@ -2084,13 +2257,16 @@ useEffect(() => {
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() => billing && openBillingPrint(billing, currentStore, 'invoice', printSettings)}
+                  onClick={() =>
+                    billing && openBillingPrint(billing, currentStore, 'invoice', printSettings)
+                  }
                   disabled={!billing}
                   title="Print"
                   style={{ padding: '6px', minWidth: 'auto' }}
                 >
                   <Printer size={16} />
                 </button>
+
                 <button
                   type="button"
                   className="ghost-button"
@@ -2101,7 +2277,7 @@ useEffect(() => {
                 >
                   <Download size={16} />
                 </button>
-                {/* Void sale — only if user has pos.void permission */}
+
                 {canVoid && (
                   <button
                     type="button"
@@ -2114,81 +2290,34 @@ useEffect(() => {
                     Void
                   </button>
                 )}
-
               </div>
             </div>
 
             <div className="billing-items-list">
-              {billing?.items?.length ? (
-                billing.items.map((item) => (
-                  <div className="billing-item-row" key={item.billing_item_id}>
-                    <div className="billing-item-info">
-                      <strong className="product-name">{item.product?.product_name}</strong>
-                      <div className="vat-meta-wrapper">
-                        <span className="vat-badge">
-                          {item.vat_amount !== undefined && ` +${Number(item.vat_amount).toFixed(2)}`} (VAT)
-                        </span>
-                      </div>
-                    </div>
-                    <div className="billing-item-actions">
-                      <div className="quantity-control">
-                        <button
-                          type="button"
-                          className="icon-button"
-                          onClick={() => updateItemQuantity(item, Number(item.quantity) - 1)}
-                        >
-                          <Minus size={14} />
-                        </button>
-                        <span className="quantity-display">{item.quantity}</span>
-                        <button
-                          type="button"
-                          className="icon-button"
-                          onClick={() => updateItemQuantity(item, Number(item.quantity) + 1)}
-                        >
-                          <Plus size={14} />
-                        </button>
-                      </div>
-                      <strong className="line-total">
-                        {currency(getItemTotal(item), currentStore?.currency)}
-                      </strong>
-                      <button
-                        type="button"
-                        className="icon-button danger-icon"
-                        onClick={() => removeItem(item.billing_item_id)}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="muted">Empty billing...hover over a product to add it.</p>
-              )}
+              <BillingItemsList
+                items={billing?.items}
+                currentStore={currentStore}
+                onDecrease={handleDecreaseItem}
+                onIncrease={handleIncreaseItem}
+                onRemove={removeItem}
+              />
             </div>
-{chapa5Preview?.enabled && selectedCustomerId && (
-  <div className={`chapa5-reward-banner ${chapa5Preview.qualifies ? 'qualifies' : ''}`}>
-    {/* <div className="chapa5-info">
-      <strong>{chapa5Preview.label}</strong>
-      {' '}
-      <span className="chapa5-progress">
-        {chapa5Preview.display_progress}/{chapa5Preview.buy_count} punches
-        {chapa5Preview.qualifies
-          ? ` — 🎉 ${chapa5Preview.free_items} free item(s) earned!`
-          : ` — ${chapa5Preview.buy_count - chapa5Preview.display_progress} more to go`}
-      </span>
-    </div> */}
-    {chapa5Preview.claimable_free_items > 0 && (
-      <button
-        type="button"
-        className="primary-button chapa5-claim-btn"
-        onClick={handleClaimChapa5Reward}
-        disabled={submitting}  // ← no longer permanently disabled
-      >
-        Redeem {chapa5Preview.claimable_free_items} reward
-      </button>
-    )}
-  </div>
-)}
+
+            {chapa5Preview?.enabled && selectedCustomerId && (
+              <div className={`chapa5-reward-banner ${chapa5Preview.qualifies ? 'qualifies' : ''}`}>
+                {chapa5Preview.claimable_free_items > 0 && (
+                  <button
+                    type="button"
+                    className="primary-button chapa5-claim-btn"
+                    onClick={handleClaimChapa5Reward}
+                    disabled={submitting}
+                  >
+                    Redeem {chapa5Preview.claimable_free_items} reward
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="billing-summary-container">
               <div className="billing-summary-list">
                 <div className="summary-row">
@@ -2197,13 +2326,18 @@ useEffect(() => {
                     {currency(billing?.subtotal || 0, currentStore?.currency)}
                   </span>
                 </div>
+
                 <div className="summary-row">
-                  <span className="summary-label">VAT ({Number(billing?.vat_rate || DEFAULT_VAT_RATE)}%)</span>
+                  <span className="summary-label">
+                    VAT ({Number(billing?.vat_rate || DEFAULT_VAT_RATE)}%)
+                  </span>
                   <span className="summary-value">
                     {currency(billing?.vat_amount || 0, currentStore?.currency)}
                   </span>
                 </div>
+
                 <div className="summary-divider"></div>
+
                 <div className="summary-row total-accent-row">
                   <span className="total-label">Total Amount</span>
                   <strong className="total-value">
@@ -2228,43 +2362,25 @@ useEffect(() => {
         </aside>
       </section>
 
-<PaymentModal
-  isOpen={showPaymentModal}
-  billing={billing}
-  currentStore={currentStore}
-  itemCount={itemCount}
-  selectedCustomer={selectedCustomer}
-  customerCurrentBalance={customerCurrentBalance}
-  paymentMethod={paymentMethod}
-  amountReceived={amountReceived}
-  setAmountReceived={setAmountReceived}
-  amountTendered={amountTendered}
-  setAmountTendered={setAmountTendered}
-  mpesaPhone={mpesaPhone}
-  setMpesaPhone={setMpesaPhone}
-  mpesaCode={mpesaCode}
-  setMpesaCode={setMpesaCode}
-  cardReference={cardReference}
-  setCardReference={setCardReference}
-  cardHolder={cardHolder}
-  setCardHolder={setCardHolder}
-  submitting={submitting}
-  currency={currency}
-  onPaymentMethodChange={handlePaymentMethodChange}
-  onClose={() => { setShowPaymentModal(false); setPaymentError(''); }}
-  onCharge={handleCharge}
-  loyaltyPoints={loyaltyRule?.loyalty_points ?? 0}
-  loyaltyPointValue={loyaltyRule?.active_rule?.point_value ?? 1}
-  pointsToRedeem={pointsToRedeem}
-  setPointsToRedeem={setPointsToRedeem}
-  chapa5={loyaltyRule?.chapa5 ?? null}
-  chapa5Preview={chapa5Preview}
-  onClaimChapa5Reward={handleClaimChapa5Reward}
-  loyaltyMinPoints={loyaltyRule?.active_rule?.min_points ?? 0}
-  paymentError={paymentError}
-  setPaymentError={setPaymentError}
-/>
-
+      <PaymentModal
+        isOpen={showPaymentModal}
+        billing={billing}
+        currentStore={currentStore}
+        itemCount={itemCount}
+        selectedCustomer={selectedCustomer}
+        customerCurrentBalance={customerCurrentBalance}
+        submitting={submitting}
+        currency={currency}
+        onClose={() => setShowPaymentModal(false)}
+        onCharge={handleCharge}
+        loyaltyPoints={loyaltyRule?.loyalty_points ?? 0}
+        loyaltyPointValue={loyaltyRule?.active_rule?.point_value ?? 1}
+        pointsToRedeem={pointsToRedeem}
+        setPointsToRedeem={setPointsToRedeem}
+        chapa5Preview={chapa5Preview}
+        onClaimChapa5Reward={handleClaimChapa5Reward}
+        loyaltyMinPoints={loyaltyRule?.active_rule?.min_points ?? 0}
+      />
 
       <DraftModal
         isOpen={showDraftModal}

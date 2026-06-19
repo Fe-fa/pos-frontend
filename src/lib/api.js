@@ -49,6 +49,17 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use((response) => {
   return response;
 }, (error) => {
+  // TanStack Query aborts stale/unmounted requests on purpose (StrictMode
+  // double-mount, component unmount mid-fetch, filter change mid-fetch).
+  // That's expected behavior, not a real failure — skip logging it.
+  if (
+    axios.isCancel(error) ||
+    error.code === 'ERR_CANCELED' ||
+    error.name === 'CanceledError'
+  ) {
+    return Promise.reject(error);
+  }
+
   console.error(
     `%c[❌ API ERROR] From ${error.config?.url || 'Unknown URL'}`,
     'color: #ff4747; font-weight: bold;',

@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import Modal from '../../components/common/Modal';
 import { useStore } from '../../contexts/StoreContext';
 import { billingService } from '../../services/billingService';
 import { formatDateTime } from '../../utils/helpers';
 import { extractPaginated, EMPTY_META } from '../../utils/pagination';
-
 
 const extractRecord = (response) => {
   return response?.data?.data || response?.data || response || null;
@@ -25,8 +24,12 @@ const fulfillmentTypeOptions = [
   { value: 'delivery', label: 'Delivery' },
 ];
 
-const detailFulfillmentStatusOptions = fulfillmentStatusOptions.filter((option) => option.value);
-const detailFulfillmentTypeOptions = fulfillmentTypeOptions.filter((option) => option.value);
+const detailFulfillmentStatusOptions = fulfillmentStatusOptions.filter(
+  (option) => option.value
+);
+const detailFulfillmentTypeOptions = fulfillmentTypeOptions.filter(
+  (option) => option.value
+);
 
 const getOrderNumber = (order) => {
   if (order?.order_number) return order.order_number;
@@ -69,14 +72,38 @@ const renderFulfillmentBadge = (value) => {
   return <span className={`status-badge ${badgeClass}`}>{value || 'pending'}</span>;
 };
 
+const OrderRow = memo(function OrderRow({ order, onView }) {
+  return (
+    <tr>
+      <td>{getOrderNumber(order)}</td>
+      <td>{order.customer?.full_name || 'Walk-in customer'}</td>
+      <td>{getItemsCountLabel(order)}</td>
+      <td>{formatFulfillmentType(order.fulfillment_type)}</td>
+      <td>{renderFulfillmentBadge(order.fulfillment_status || 'pending')}</td>
+      <td>{order.billing_date ? formatDateTime(order.billing_date) : '-'}</td>
+      <td>
+        <div className="row-actions compact">
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => onView(order.billing_id)}
+          >
+            View
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+});
+
 export default function AdminOrdersPage() {
-  const { stores, storeId } = useStore();
-  const currentStore = stores.find((store) => String(store.store_id) === String(storeId));
+  const { storeId } = useStore();
 
   const [orders, setOrders] = useState([]);
   const [meta, setMeta] = useState({ ...EMPTY_META });
+
   const [page, setPage] = useState(1);
-  const [perPage, setPerPage] = useState(null);
+  const [perPage, setPerPage] = useState(10);
 
   const [loading, setLoading] = useState(false);
   const [fulfillmentStatus, setFulfillmentStatus] = useState('');
@@ -86,56 +113,21 @@ export default function AdminOrdersPage() {
   const [success, setSuccess] = useState('');
   const [savingFulfillment, setSavingFulfillment] = useState(false);
 
-  const requestRef = useRef(0);
+  const listRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
 
-  const loadOrders = useCallback(
-    async (targetPage = page) => {
-      if (!storeId) {
-        setOrders([]);
-        setMeta({ ...EMPTY_META });
-        setLoading(false);
-        return;
-      }
-
-      const requestId = ++requestRef.current;
-      setLoading(true);
-      setError('');
-
-      try {
-        const params = {
-          page: targetPage,
-          per_page: perPage ?? 10, // ← safe fallback
-          store_id: storeId,
-        };
-
-        if (fulfillmentStatus) params.fulfillment_status = fulfillmentStatus;
-        if (fulfillmentType) params.fulfillment_type = fulfillmentType;
-
-        const response = await billingService.list(params);
-        if (requestId !== requestRef.current) return;
-
-        const parsed = extractPaginated(response, perPage ?? 10); // ← shared util
-        setMeta(parsed.meta);
-        setOrders(parsed.data || []);
-
-        if (perPage === null) setPerPage(parsed.meta.per_page); // ← bootstrap
-      } catch (err) {
-        if (requestId !== requestRef.current) return;
-        setError(err?.response?.data?.message || 'Unable to load orders.');
-        setOrders([]);
-        setMeta({ ...EMPTY_META });
-      } finally {
-        if (requestId === requestRef.current) setLoading(false);
-      }
-    },
-    [page, fulfillmentStatus, fulfillmentType, storeId, perPage] // ← add perPage
+  const orderParams = useMemo(
+    () => ({
+      page,
+      per_page: perPage,
+      store_id: storeId,
+      ...(fulfillmentStatus ? { fulfillment_status: fulfillmentStatus } : {}),
+      ...(fulfillmentType ? { fulfillment_type: fulfillmentType } : {}),
+    }),
+    [page, perPage, storeId, fulfillmentStatus, fulfillmentType]
   );
 
-  useEffect(() => {
-    setSelectedOrder(null);
-    setError('');
-    setSuccess('');
-
+  const loadOrders = useCallback(async () => {
     if (!storeId) {
       setOrders([]);
       setMeta({ ...EMPTY_META });
@@ -143,8 +135,37 @@ export default function AdminOrdersPage() {
       return;
     }
 
-    loadOrders(page);
-  }, [storeId, page, perPage, fulfillmentStatus, fulfillmentType, loadOrders]);
+    const requestId = ++listRequestRef.current;
+    setLoading(true);
+    setError('');
+
+    try {
+      const response = await billingService.list(orderParams);
+      if (requestId !== listRequestRef.current) return;
+
+      const parsed = extractPaginated(response, perPage);
+      setMeta(parsed.meta || { ...EMPTY_META });
+      setOrders(parsed.data || []);
+    } catch (err) {
+      if (requestId !== listRequestRef.current) return;
+      setError(err?.response?.data?.message || 'Unable to load orders.');
+      setMeta({ ...EMPTY_META });
+    } finally {
+      if (requestId === listRequestRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [storeId, orderParams, perPage]);
+
+  useEffect(() => {
+    loadOrders();
+  }, [loadOrders]);
+
+  useEffect(() => {
+    setSelectedOrder(null);
+    setError('');
+    setSuccess('');
+  }, [storeId]);
 
   useEffect(() => {
     if (!success) return;
@@ -156,35 +177,27 @@ export default function AdminOrdersPage() {
     return () => clearTimeout(timer);
   }, [success]);
 
-  // Store reset
-  useEffect(() => {
-    setOrders([]);
-    setMeta({ ...EMPTY_META });
-    setPage(1);
-    setPerPage(null);
-    setFulfillmentStatus('');
-    setFulfillmentType('');
-    setSelectedOrder(null);
-    setError('');
-    setSuccess('');
-  }, [storeId]);
+  const openDetails = useCallback(async (billingId) => {
+    if (!billingId) return;
 
-  const openDetails = async (billingId) => {
+    const requestId = ++detailRequestRef.current;
     setError('');
 
     try {
       const response = await billingService.show(billingId);
+      if (requestId !== detailRequestRef.current) return;
       setSelectedOrder(extractRecord(response));
     } catch (err) {
+      if (requestId !== detailRequestRef.current) return;
       setError(err?.response?.data?.message || 'Unable to load order detail.');
     }
-  };
+  }, []);
 
-  const closeDetails = () => {
+  const closeDetails = useCallback(() => {
     setSelectedOrder(null);
-  };
+  }, []);
 
-  const handleSaveFulfillment = async () => {
+  const handleSaveFulfillment = useCallback(async () => {
     if (!selectedOrder?.billing_id) return;
 
     setSavingFulfillment(true);
@@ -218,7 +231,46 @@ export default function AdminOrdersPage() {
     } finally {
       setSavingFulfillment(false);
     }
-  };
+  }, [selectedOrder]);
+
+  const handleFulfillmentStatusChange = useCallback((e) => {
+    setFulfillmentStatus(e.target.value);
+    setPage(1);
+  }, []);
+
+  const handleFulfillmentTypeChange = useCallback((e) => {
+    setFulfillmentType(e.target.value);
+    setPage(1);
+  }, []);
+
+  const handlePerPageChange = useCallback((e) => {
+    setPerPage(Number(e.target.value));
+    setPage(1);
+  }, []);
+
+  const handlePrevPage = useCallback(() => {
+    setPage((prev) => Math.max(prev - 1, 1));
+  }, []);
+
+  const handleNextPage = useCallback(() => {
+    setPage((prev) => Math.min(prev + 1, meta.last_page || 1));
+  }, [meta.last_page]);
+
+  const handleSelectedOrderStatusChange = useCallback((e) => {
+    const value = e.target.value;
+    setSelectedOrder((prev) => ({
+      ...prev,
+      fulfillment_status: value,
+    }));
+  }, []);
+
+  const handleSelectedOrderTypeChange = useCallback((e) => {
+    const value = e.target.value;
+    setSelectedOrder((prev) => ({
+      ...prev,
+      fulfillment_type: value,
+    }));
+  }, []);
 
   return (
     <section className="stack-lg">
@@ -231,10 +283,7 @@ export default function AdminOrdersPage() {
           <select
             className="select-input slim"
             value={fulfillmentStatus}
-            onChange={(e) => {
-              setFulfillmentStatus(e.target.value);
-              setPage(1);
-            }}
+            onChange={handleFulfillmentStatusChange}
             disabled={!storeId}
           >
             {fulfillmentStatusOptions.map((option) => (
@@ -247,10 +296,7 @@ export default function AdminOrdersPage() {
           <select
             className="select-input slim"
             value={fulfillmentType}
-            onChange={(e) => {
-              setFulfillmentType(e.target.value);
-              setPage(1);
-            }}
+            onChange={handleFulfillmentTypeChange}
             disabled={!storeId}
           >
             {fulfillmentTypeOptions.map((option) => (
@@ -259,22 +305,30 @@ export default function AdminOrdersPage() {
               </option>
             ))}
           </select>
+
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="muted">Show</span>
             <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
               <ChevronDown
                 size={14}
-                style={{ position: 'absolute', right: 8, pointerEvents: 'none', color: 'var(--color-text-secondary)' }}
+                style={{
+                  position: 'absolute',
+                  right: 8,
+                  pointerEvents: 'none',
+                  color: 'var(--color-text-secondary)',
+                }}
               />
               <select
                 className="select-input slim"
-                value={perPage ?? 10}
-                onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
+                value={perPage}
+                onChange={handlePerPageChange}
                 disabled={!storeId}
                 style={{ paddingRight: 28, appearance: 'none' }}
               >
-                {[5, 10, 20, 50, 100].map(n => (
-                  <option key={n} value={n}>{n} per page</option>
+                {[5, 10, 20, 50, 100].map((n) => (
+                  <option key={n} value={n}>
+                    {n} per page
+                  </option>
                 ))}
               </select>
             </div>
@@ -325,25 +379,11 @@ export default function AdminOrdersPage() {
                 </tr>
               ) : orders.length ? (
                 orders.map((order) => (
-                  <tr key={order.billing_id}>
-                    <td>{getOrderNumber(order)}</td>
-                    <td>{order.customer?.full_name || 'Walk-in customer'}</td>
-                    <td>{getItemsCountLabel(order)}</td>
-                    <td>{formatFulfillmentType(order.fulfillment_type)}</td>
-                    <td>{renderFulfillmentBadge(order.fulfillment_status || 'pending')}</td>
-                    <td>{order.billing_date ? formatDateTime(order.billing_date) : '-'}</td>
-                    <td>
-                      <div className="row-actions compact">
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() => openDetails(order.billing_id)}
-                        >
-                          View
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                  <OrderRow
+                    key={order.billing_id}
+                    order={order}
+                    onView={openDetails}
+                  />
                 ))
               ) : (
                 <tr>
@@ -365,14 +405,18 @@ export default function AdminOrdersPage() {
 
             <div className="row-actions compact">
               <button
-                onClick={() => setPage(Math.max(meta.current_page - 1, 1))}
+                type="button"
+                className="ghost-button"
+                onClick={handlePrevPage}
                 disabled={loading || !meta.has_prev_page}
               >
                 Previous
               </button>
 
               <button
-                onClick={() => setPage(Math.min(meta.current_page + 1, meta.last_page))}
+                type="button"
+                className="ghost-button"
+                onClick={handleNextPage}
                 disabled={loading || !meta.has_next_page}
               >
                 Next
@@ -418,12 +462,7 @@ export default function AdminOrdersPage() {
                 <select
                   className="select-input"
                   value={selectedOrder.fulfillment_status || 'pending'}
-                  onChange={(e) =>
-                    setSelectedOrder((prev) => ({
-                      ...prev,
-                      fulfillment_status: e.target.value,
-                    }))
-                  }
+                  onChange={handleSelectedOrderStatusChange}
                 >
                   {detailFulfillmentStatusOptions.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -438,12 +477,7 @@ export default function AdminOrdersPage() {
                 <select
                   className="select-input"
                   value={selectedOrder.fulfillment_type || 'walk_in_counter'}
-                  onChange={(e) =>
-                    setSelectedOrder((prev) => ({
-                      ...prev,
-                      fulfillment_type: e.target.value,
-                    }))
-                  }
+                  onChange={handleSelectedOrderTypeChange}
                 >
                   {detailFulfillmentTypeOptions.map((option) => (
                     <option key={option.value} value={option.value}>

@@ -7,7 +7,7 @@ import AdminBillingsPage from '../pages/admin/AdminBillingsPage';
 import AdminCategoriesPage from '../pages/admin/AdminCategoriesPage';
 import AdminCustomersPage from '../pages/admin/AdminCustomersPage';
 import AdminDashboardPage from '../pages/admin/AdminDashboardPage';
-import AdminInventoryPage from '../pages/admin/AdminInventoryPage';
+import AdminInventoryPage from '../pages/admin/Inventory/AdminInventoryPage';
 import AdminOrdersPage from '../pages/admin/AdminOrdersPage';
 import AdminProductsPage from '../pages/admin/AdminProductsPage';
 import AdminSettingsPage from '../pages/admin/AdminSettingsPage';
