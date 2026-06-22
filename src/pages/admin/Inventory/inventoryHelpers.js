@@ -36,12 +36,15 @@ export const formatSignedQty = (value) => {
 
 export const toPaginatedResult = (response, fallbackPerPage) => {
   const parsed = extractPaginated(response, fallbackPerPage);
+  const pagination = parsed?.meta || { ...EMPTY_META };
 
   return {
     rows: parsed?.data || [],
-    pagination: parsed?.meta || { ...EMPTY_META },
+    pagination,
+    perPage: pagination.per_page ? Number(pagination.per_page) : null,
   };
 };
+
 export const sameStorePlaceholder = (storeId) => (previousData, previousQuery) => {
   const previousStoreId = previousQuery?.queryKey?.[1];
   return previousStoreId === storeId ? previousData : undefined;

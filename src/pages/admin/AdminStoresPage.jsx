@@ -1,137 +1,221 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Building2,
-  MapPin,
-  Phone,
+  CheckCircle,
+  Coins,
   Store as StoreIcon,
   Edit,
   Ban,
+  Loader2,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { storeService } from '../../services/storeService';
 import StoreModal from '../../components/modals/StoreModal';
 
 const initialForm = {
-  store_name: '',
-  location: '',
-  currency: 'KES',
-  telephone: '',
-  pin: '',
+  store_name:       '',
+  location:         '',
+  currency:         'KES',
+  telephone:        '',
+  pin:              '',
   physical_address: '',
-  email_address: '',
-  logo_url: '',
-  is_active: true,
+  email_address:    '',
+  logo_url:         '',
+  is_active:        true,
 };
 
-const emptyPagination = {
-  data: [],
-  current_page: 1,
-  per_page: 10,
-  prev_page_url: null,
-  next_page_url: null,
-  from: null,
-  to: null,
+const EMPTY_PAGINATION = {
+  current_page:  1,
+  last_page:     1,
+  per_page:      null, // null = not yet resolved from backend
+  total:         0,
+  from:          null,
+  to:            null,
+  has_prev_page: false,
+  has_next_page: false,
 };
 
-const extractPagination = (response) => {
+/** Normalise whatever shape the API returns into a flat pagination object */
+function extractPagination(response) {
   const payload = response?.data ?? response ?? {};
 
-  if (Array.isArray(payload?.data)) {
-    return { ...emptyPagination, ...payload, data: payload.data };
-  }
-
-  if (Array.isArray(payload)) {
+  // Paginated envelope: { data: [...], meta: { current_page, last_page, ... } }
+  if (Array.isArray(payload?.data) && payload?.meta) {
+    const m = payload.meta;
     return {
-      ...emptyPagination,
-      data: payload,
-      per_page: payload.length,
-      from: payload.length ? 1 : null,
-      to: payload.length || null,
+      data:          payload.data,
+      current_page:  m.current_page  ?? 1,
+      last_page:     m.last_page     ?? 1,
+      per_page:      m.per_page      ?? null,
+      total:         m.total         ?? payload.data.length,
+      from:          m.from          ?? null,
+      to:            m.to            ?? null,
+      has_prev_page: (m.current_page ?? 1) > 1,
+      has_next_page: (m.current_page ?? 1) < (m.last_page ?? 1),
     };
   }
 
-  return emptyPagination;
-};
+  // Legacy paginated envelope: { data: [...], current_page, prev_page_url, next_page_url, ... }
+  if (Array.isArray(payload?.data)) {
+    return {
+      data:          payload.data,
+      current_page:  payload.current_page  ?? 1,
+      last_page:     payload.last_page      ?? 1,
+      per_page:      payload.per_page       ?? null,
+      total:         payload.total          ?? payload.data.length,
+      from:          payload.from           ?? null,
+      to:            payload.to             ?? null,
+      has_prev_page: !!payload.prev_page_url,
+      has_next_page: !!payload.next_page_url,
+    };
+  }
 
-function SummaryCard({ icon: Icon, label, value, caption }) {
+  // Bare array (no pagination)
+  if (Array.isArray(payload)) {
+    return {
+      ...EMPTY_PAGINATION,
+      data:          payload,
+      per_page:      payload.length,
+      total:         payload.length,
+      from:          payload.length ? 1 : null,
+      to:            payload.length || null,
+    };
+  }
+
+  return { ...EMPTY_PAGINATION, data: [] };
+}
+function SummaryCard({ icon: Icon, label, value, tone }) {
   return (
-    <article className="metric-card">
+    <article className={`metric-card metric-tone-${tone}`}>
       <div className="metric-card-top">
         <p>{label}</p>
-        <div className="metric-icon">
-          <Icon size={16} />
-        </div>
+        <div className="metric-icon-badge"><Icon size={18} /></div>
       </div>
       <h3>{value}</h3>
-      {caption ? <span>{caption}</span> : null}
     </article>
   );
 }
 
 export default function AdminStoresPage() {
-    const { user, can } = useAuth();
-  const canManage = can('stores.manage'); 
-  const [stores, setStores] = useState([]);
-  const [pagination, setPagination] = useState(emptyPagination);
-  const [page, setPage] = useState(1);
-  const [form, setForm] = useState(initialForm);
-  const [editingId, setEditingId] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [message, setMessage] = useState('');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-
+  const { user, can } = useAuth();
   const canManageStores = user?.role === 'admin';
 
-  const load = async () => {
+  const [stores, setStores]       = useState([]);
+  const [pagination, setPagination] = useState({ ...EMPTY_PAGINATION });
+  const [page, setPage]           = useState(1);
+  // null = not yet resolved; locked to meta.per_page after first successful load
+  const [perPage, setPerPage]     = useState(null);
+  const [loading, setLoading]     = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError]         = useState('');
+  const [message, setMessage]     = useState('');
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingId, setEditingId]     = useState(null);
+  const [form, setForm]               = useState(initialForm);
+
+  // Stable ref so load() always reads the latest values without being listed in deps
+  const paramsRef = useRef({});
+  paramsRef.current = { page, perPage };
+
+  // Abort controller ref — cancels stale in-flight requests on rapid page changes / unmount
+  const abortRef = useRef(null);
+
+  const load = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+
+    const { page: pg, perPage: pp } = paramsRef.current;
+
     setLoading(true);
     setError('');
 
     try {
-      const response = await storeService.list({ page, per_page: 10 });
-      const parsed = extractPagination(response);
+      const params = {
+        page,
+        // Omit per_page on first load so the backend returns its own default
+        ...(pp !== null && { per_page: pp }),
+      };
 
-      setStores(parsed.data || []);
+      const response = await storeService.list(params, { signal: abortRef.current.signal });
+      const parsed   = extractPagination(response);
+
+      setStores(parsed.data);
       setPagination(parsed);
+
+      // Lock in the backend's per_page on the very first successful load
+      if (pp === null && parsed.per_page !== null) {
+        setPerPage(parsed.per_page);
+      }
     } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') return;
       setError(err?.response?.data?.message || 'Unable to load stores.');
       setStores([]);
-      setPagination(emptyPagination);
+      setPagination({ ...EMPTY_PAGINATION });
     } finally {
       setLoading(false);
     }
-  };
+  }, []); // stable — reads live values from paramsRef
 
+  // Re-run only when page or perPage actually changes
   useEffect(() => {
     load();
-  }, [page]);
+  }, [load, page, perPage]);
+
+  // Cleanup on unmount
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const summary = useMemo(() => {
-    const active = stores.filter((store) => store.is_active).length;
-    const inactive = stores.length - active;
-    const currencies = new Set(
-      stores.map((store) => store.currency).filter(Boolean)
-    ).size;
-
+    const active     = stores.filter((s) => s.is_active).length;
+    const inactive   = stores.length - active;
+    const currencies = new Set(stores.map((s) => s.currency).filter(Boolean)).size;
     return { active, inactive, currencies };
   }, [stores]);
 
-  const resetForm = () => {
+  // ── Modal helpers ────────────────────────────────────────────────────────────
+
+  const resetForm = useCallback(() => {
     setForm(initialForm);
     setEditingId(null);
     setError('');
     setMessage('');
-  };
+  }, []);
 
-  const handleOpenCreateModal = () => {
+  const handleOpenCreateModal = useCallback(() => {
     resetForm();
     setIsModalOpen(true);
-  };
+  }, [resetForm]);
+
+  const handleEdit = useCallback((store) => {
+    setEditingId(store.store_id);
+    setForm({
+      store_name:       store.store_name       || '',
+      location:         store.location         || '',
+      currency:         store.currency         || 'KES',
+      telephone:        store.telephone        || '',
+      pin:              store.pin              || '',
+      physical_address: store.physical_address || '',
+      email_address:    store.email_address    || '',
+      logo_url:         store.logo_url         || '',
+      is_active:        Boolean(store.is_active),
+    });
+    setMessage('');
+    setError('');
+    setIsModalOpen(true);
+  }, []);
+
+  const handleCloseModal = useCallback(() => {
+    if (submitting) return;
+    setIsModalOpen(false);
+    resetForm();
+  }, [submitting, resetForm]);
+
+  // ── Submit handlers ──────────────────────────────────────────────────────────
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError('');
     setMessage('');
+    setSubmitting(true);
 
     try {
       if (editingId) {
@@ -142,49 +226,42 @@ export default function AdminStoresPage() {
         setMessage('Store created successfully.');
       }
 
-      setForm(initialForm);
-      setEditingId(null);
+      // Close modal + reset, then reload once
       setIsModalOpen(false);
+      setEditingId(null);
+      setForm(initialForm);
+      setPage(1);
       await load();
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to save store.');
+    } finally {
+      setSubmitting(false);
     }
-  };
-
-  const handleEdit = (store) => {
-    setEditingId(store.store_id);
-    setForm({
-      store_name: store.store_name || '',
-      location: store.location || '',
-      currency: store.currency || 'KES',
-      telephone: store.telephone || '',
-      pin: store.pin || '',
-      physical_address: store.physical_address || '',
-      email_address: store.email_address || '',
-      logo_url: store.logo_url || '',
-      is_active: Boolean(store.is_active),
-    });
-    setMessage('');
-    setError('');
-    setIsModalOpen(true);
   };
 
   const handleDelete = async (targetStoreId) => {
     if (!window.confirm('Deactivate this store?')) return;
 
+    setSubmitting(true);
     try {
       await storeService.remove(targetStoreId);
       setMessage('Store deactivated successfully.');
 
-      if (stores.length === 1 && page > 1) {
-        setPage((prev) => prev - 1);
+      // If we just deleted the last item on a page beyond 1, step back
+      const newPage = stores.length === 1 && page > 1 ? page - 1 : page;
+      if (newPage !== page) {
+        setPage(newPage); // useEffect will trigger load()
       } else {
-        await load();
+        await load();     // same page — reload directly
       }
     } catch (err) {
       setError(err?.response?.data?.message || 'Unable to remove store.');
+    } finally {
+      setSubmitting(false);
     }
   };
+
+  // ── Access guard ─────────────────────────────────────────────────────────────
 
   if (!canManageStores) {
     return (
@@ -202,32 +279,60 @@ export default function AdminStoresPage() {
     );
   }
 
-  return (
-    <section className="stack-lg">
-      <div className="section-header">
-        <div>
-          <h3>Stores</h3>
-        </div>
+  // ── Render ───────────────────────────────────────────────────────────────────
 
-        <button
-          type="button"
-          className="primary-button"
-          onClick={handleOpenCreateModal}
+  return (
+    <section className="stack-lg" style={{ position: 'relative' }}>
+
+      {/* Keyframe injected once */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+      {/* Page-level spinner overlay — hidden while a modal submit is running (modal has its own) */}
+      {loading && !submitting && (
+        <div
+          style={{
+            position:       'absolute',
+            inset:          0,
+            zIndex:         10,
+            display:        'flex',
+            alignItems:     'center',
+            justifyContent: 'center',
+            background:     'rgba(var(--color-bg-rgb, 255 255 255) / 0.6)',
+            backdropFilter: 'blur(2px)',
+            borderRadius:   'inherit',
+            pointerEvents:  'none',
+          }}
+          aria-live="polite"
+          aria-label="Loading stores"
         >
+          <Loader2
+            size={32}
+            style={{ animation: 'spin 0.8s linear infinite', color: 'var(--color-primary, #6366f1)' }}
+          />
+        </div>
+      )}
+
+      {/* ── Page header ── */}
+      <div className="section-header">
+        <div><h3>Stores</h3></div>
+        <button type="button" className="primary-button" onClick={handleOpenCreateModal} disabled={submitting}>
           Create store
         </button>
       </div>
 
-      {message && !isModalOpen ? <p className="form-success">{message}</p> : null}
-      {error && !isModalOpen ? <p className="form-error">{error}</p> : null}
+      {/* Global feedback — suppressed while modal is open (modal shows its own) */}
+      {message && !isModalOpen && <p className="form-success">{message}</p>}
+      {error   && !isModalOpen && <p className="form-error">{error}</p>}
 
+      {/* ── Summary cards ── */}
       <div className="metrics-grid">
-        <SummaryCard icon={StoreIcon} label="Stores" value={stores.length} />
-        <SummaryCard icon={Building2} label="Active" value={summary.active} />
-        <SummaryCard icon={MapPin} label="Inactive" value={summary.inactive} />
-        <SummaryCard icon={Phone} label="Currencies" value={summary.currencies} />
+       <SummaryCard icon={StoreIcon}   label="Stores"      value={stores.length}      tone="soft" />
+        <SummaryCard icon={CheckCircle} label="Active"      value={summary.active}     tone="success" />
+        <SummaryCard icon={Ban}         label="Inactive"    value={summary.inactive}   tone={summary.inactive > 0 ? 'danger' : 'brown'} />
+       <SummaryCard icon={Coins}       label="Currencies"  value={summary.currencies} tone="gold" />
       </div>
 
+      {/* ── Table card ── */}
       <div className="dashboard-grid">
         <article className="card">
           <div className="card-header">
@@ -235,8 +340,8 @@ export default function AdminStoresPage() {
               <h3>All stores</h3>
               <p>
                 {pagination.from && pagination.to
-                  ? `Showing ${pagination.from}-${pagination.to}`
-                  : `${stores.length} locations`}
+                  ? `Showing ${pagination.from}–${pagination.to} of ${pagination.total}`
+                  : `${stores.length} location${stores.length !== 1 ? 's' : ''}`}
               </p>
             </div>
           </div>
@@ -254,21 +359,19 @@ export default function AdminStoresPage() {
               </thead>
 
               <tbody>
-                {loading ? (
-                  <tr>
-                    <td colSpan="5">Loading...</td>
-                  </tr>
-                ) : stores.length ? (
+                {!loading && !stores.length ? (
+                  <tr><td colSpan="5">No stores found.</td></tr>
+                ) : (
                   stores.map((store) => (
                     <tr key={store.store_id}>
                       <td>
                         <strong>{store.store_name}</strong>
                         <div className="muted">{store.currency}</div>
                       </td>
-                      <td>{store.location || store.physical_address || '-'}</td>
+                      <td>{store.location || store.physical_address || '—'}</td>
                       <td>
-                        <div>{store.email_address || '-'}</div>
-                        <div className="muted">{store.telephone || '-'}</div>
+                        <div>{store.email_address || '—'}</div>
+                        <div className="muted">{store.telephone || '—'}</div>
                       </td>
                       <td>
                         <span className={`badge ${store.is_active ? 'success' : 'danger'}`}>
@@ -281,15 +384,16 @@ export default function AdminStoresPage() {
                             type="button"
                             className="ghost-button"
                             onClick={() => handleEdit(store)}
+                            disabled={submitting}
                             title="Edit"
                           >
                             <Edit size={16} />
                           </button>
-
                           <button
                             type="button"
                             className="ghost-button danger"
                             onClick={() => handleDelete(store.store_id)}
+                            disabled={submitting}
                             title="Deactivate"
                           >
                             <Ban size={16} />
@@ -298,36 +402,39 @@ export default function AdminStoresPage() {
                       </td>
                     </tr>
                   ))
-                ) : (
-                  <tr>
-                    <td colSpan="5">No stores found.</td>
-                  </tr>
                 )}
               </tbody>
             </table>
           </div>
 
+          {/* ── Pagination bar ── */}
           <div
             className="row-actions"
             style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
           >
-            <span className="muted">Page {pagination.current_page || page}</span>
+            <span className="muted">
+              Page {pagination.current_page} of {pagination.last_page}
+            </span>
 
             <div className="row-actions compact">
               <button
                 type="button"
                 className="ghost-button"
-                onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
-                disabled={!pagination.prev_page_url || loading}
+                onClick={() => setPage((p) => Math.max(p - 1, 1))}
+                disabled={!pagination.has_prev_page || loading || submitting}
               >
                 Previous
               </button>
 
+              <span className="muted" style={{ padding: '0 8px' }}>
+                {/* {pagination.current_page}  {pagination.last_page} */}
+              </span>
+
               <button
                 type="button"
                 className="ghost-button"
-                onClick={() => setPage((prev) => prev + 1)}
-                disabled={!pagination.next_page_url || loading}
+                onClick={() => setPage((p) => Math.min(p + 1, pagination.last_page))}
+                disabled={!pagination.has_next_page || loading || submitting}
               >
                 Next
               </button>
@@ -335,16 +442,16 @@ export default function AdminStoresPage() {
           </div>
         </article>
       </div>
-
       <StoreModal
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        onClose={handleCloseModal}
         form={form}
         setForm={setForm}
         handleSubmit={handleSubmit}
         editingId={editingId}
         error={error}
         message={message}
+        submitting={submitting}
         resetForm={resetForm}
       />
     </section>

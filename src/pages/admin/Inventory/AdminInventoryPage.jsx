@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   useMutation,
   useQuery,
@@ -47,12 +47,15 @@ function AdminInventoryPageContent() {
 
   const debouncedSearch = useDebouncedValue(ui.search, 300);
 
-  // Only reset filters/modal/form when the store actually changes —
-  // not on every ui-state update.
+  // Reset filters/modal/form only when the store changes.
   useEffect(() => {
     ui.resetForStoreChange();
   }, [storeId, ui.resetForStoreChange]);
 
+  // ── inventory list query ──────────────────────────────────────────────────
+  // pageSize starts as null. On the first request we omit per_page so the
+  // backend applies its own default. The select callback returns meta.per_page
+  // so we can seed ui.pageSize once.
   const inventoryQuery = useQuery({
     queryKey: ['inventory', storeId, ui.inventoryPage, ui.pageSize, debouncedSearch],
     enabled: Boolean(storeId),
@@ -62,14 +65,23 @@ function AdminInventoryPageContent() {
         {
           store_id: storeId,
           page: ui.inventoryPage,
-          per_page: ui.pageSize,
+          // Omit per_page on first load (null) so backend default takes effect.
+          ...(ui.pageSize !== null ? { per_page: ui.pageSize } : {}),
           ...(debouncedSearch ? { search: debouncedSearch } : {}),
         },
         { signal }
       ),
-    select: (response) => toPaginatedResult(response, ui.pageSize),
+    select: (response) => toPaginatedResult(response, ui.pageSize ?? undefined),
   });
 
+  // Seed pageSize from the first successful response — runs once.
+  useEffect(() => {
+    if (ui.pageSize === null && inventoryQuery.data?.perPage) {
+      ui.setPageSize(inventoryQuery.data.perPage);
+    }
+  }, [ui.pageSize, inventoryQuery.data?.perPage, ui.setPageSize]);
+
+  // ── history query ─────────────────────────────────────────────────────────
   const historyQuery = useQuery({
     queryKey: ['inventory-history', storeId, ui.historyPage, ui.historyPageSize, debouncedSearch],
     enabled: Boolean(storeId),
@@ -79,15 +91,22 @@ function AdminInventoryPageContent() {
         {
           store_id: storeId,
           page: ui.historyPage,
-          per_page: ui.historyPageSize,
+          ...(ui.historyPageSize !== null ? { per_page: ui.historyPageSize } : {}),
           ...(debouncedSearch ? { search: debouncedSearch } : {}),
         },
         { signal }
       ),
-    select: (response) => toPaginatedResult(response, ui.historyPageSize),
+    select: (response) => toPaginatedResult(response, ui.historyPageSize ?? undefined),
   });
 
-  // Only fetch the products dropdown while the modal is actually open.
+  // Seed historyPageSize from the first successful history response.
+  useEffect(() => {
+    if (ui.historyPageSize === null && historyQuery.data?.perPage) {
+      ui.setHistoryPageSize(historyQuery.data.perPage);
+    }
+  }, [ui.historyPageSize, historyQuery.data?.perPage, ui.setHistoryPageSize]);
+
+  // ── products dropdown — only fetched while the modal is open ─────────────
   const productsQuery = useQuery({
     queryKey: ['products', storeId, 'inventory-form'],
     enabled: Boolean(storeId && ui.showModal),
@@ -97,6 +116,7 @@ function AdminInventoryPageContent() {
     select: extractList,
   });
 
+  // ── derived values ────────────────────────────────────────────────────────
   const inventoryRows = inventoryQuery.data?.rows || [];
   const inventoryPagination = inventoryQuery.data?.pagination || { ...EMPTY_META };
 
@@ -111,36 +131,33 @@ function AdminInventoryPageContent() {
   );
 
   const pageError = useMemo(() => {
-    if (inventoryQuery.isError) {
+    if (inventoryQuery.isError)
       return getErrorMessage(inventoryQuery.error, 'Unable to load inventory.');
-    }
-    if (historyQuery.isError) {
+    if (historyQuery.isError)
       return getErrorMessage(historyQuery.error, 'Unable to load inventory history.');
-    }
     return '';
   }, [inventoryQuery.isError, inventoryQuery.error, historyQuery.isError, historyQuery.error]);
 
   const modalError = useMemo(() => {
     if (ui.formError) return ui.formError;
-    if (productsQuery.isError) {
+    if (productsQuery.isError)
       return getErrorMessage(productsQuery.error, 'Unable to load products.');
-    }
     return '';
   }, [ui.formError, productsQuery.isError, productsQuery.error]);
 
+  // ── mutations ─────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
-    mutationFn: async ({ inventoryId, payload }) => {
-      if (inventoryId) {
-        return inventoryService.update(inventoryId, payload);
-      }
-      return inventoryService.create(payload);
-    },
+    mutationFn: async ({ inventoryId, payload }) =>
+      inventoryId
+        ? inventoryService.update(inventoryId, payload)
+        : inventoryService.create(payload),
     onSuccess: async () => {
       ui.setShowModal(false);
       ui.resetForm();
       ui.setInventoryPage(1);
       ui.setHistoryPage(1);
 
+      // Invalidate both lists in parallel — no need to await sequentially.
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['inventory', storeId] }),
         queryClient.invalidateQueries({ queryKey: ['inventory-history', storeId] }),
@@ -154,6 +171,7 @@ function AdminInventoryPageContent() {
   const deleteMutation = useMutation({
     mutationFn: (inventoryId) => inventoryService.remove(inventoryId),
     onSuccess: async () => {
+      // If we deleted the last row on a non-first page, step back one page.
       const nextPage =
         inventoryRows.length === 1 && inventoryPagination.current_page > 1
           ? inventoryPagination.current_page - 1
@@ -174,35 +192,95 @@ function AdminInventoryPageContent() {
     },
   });
 
-  const handleSearchChange = (e) => {
-    ui.setSearch(e.target.value);
-    ui.setInventoryPage(1);
-    ui.setHistoryPage(1);
-  };
+  // ── handlers ──────────────────────────────────────────────────────────────
+  const handleSearchChange = useCallback(
+    (e) => {
+      ui.setSearch(e.target.value);
+      ui.setInventoryPage(1);
+      ui.setHistoryPage(1);
+    },
+    [ui.setSearch, ui.setInventoryPage, ui.setHistoryPage]
+  );
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
+  const handlePageSizeChange = useCallback(
+    (e) => {
+      ui.setPageSize(Number(e.target.value));
+      ui.setInventoryPage(1);
+    },
+    [ui.setPageSize, ui.setInventoryPage]
+  );
 
-    if (!storeId) return;
+  const handleHistoryPageSizeChange = useCallback(
+    (e) => {
+      ui.setHistoryPageSize(Number(e.target.value));
+      ui.setHistoryPage(1);
+    },
+    [ui.setHistoryPageSize, ui.setHistoryPage]
+  );
 
-    ui.setFormError('');
+  const handlePreviousInventoryPage = useCallback(
+    () =>
+      ui.setInventoryPage(Math.max((inventoryPagination.current_page || 1) - 1, 1)),
+    [ui.setInventoryPage, inventoryPagination.current_page]
+  );
 
-    const payload = {
-      store_id: Number(storeId),
-      product_id: Number(ui.form.product_id),
-      batch_no: ui.form.batch_no.trim(),
-      quantity: Number(ui.form.quantity),
-      reorder_level: Number(ui.form.reorder_level || 0),
-    };
+  const handleNextInventoryPage = useCallback(
+    () =>
+      ui.setInventoryPage(
+        Math.min(
+          (inventoryPagination.current_page || 1) + 1,
+          inventoryPagination.last_page || 1
+        )
+      ),
+    [ui.setInventoryPage, inventoryPagination.current_page, inventoryPagination.last_page]
+  );
 
-    saveMutation.mutate({ inventoryId: ui.editingId, payload });
-  };
+  const handlePreviousHistoryPage = useCallback(
+    () =>
+      ui.setHistoryPage(Math.max((historyPagination.current_page || 1) - 1, 1)),
+    [ui.setHistoryPage, historyPagination.current_page]
+  );
 
-  const handleDelete = (inventoryId) => {
-    if (!window.confirm('Delete this inventory row? Quantity must be zero.')) return;
-    deleteMutation.mutate(inventoryId);
-  };
+  const handleNextHistoryPage = useCallback(
+    () =>
+      ui.setHistoryPage(
+        Math.min(
+          (historyPagination.current_page || 1) + 1,
+          historyPagination.last_page || 1
+        )
+      ),
+    [ui.setHistoryPage, historyPagination.current_page, historyPagination.last_page]
+  );
 
+  const handleSubmit = useCallback(
+    (e) => {
+      e.preventDefault();
+      if (!storeId) return;
+
+      ui.setFormError('');
+
+      const payload = {
+        store_id: Number(storeId),
+        product_id: Number(ui.form.product_id),
+        batch_no: ui.form.batch_no.trim(),
+        quantity: Number(ui.form.quantity),
+        reorder_level: Number(ui.form.reorder_level || 0),
+      };
+
+      saveMutation.mutate({ inventoryId: ui.editingId, payload });
+    },
+    [storeId, ui, saveMutation]
+  );
+
+  const handleDelete = useCallback(
+    (inventoryId) => {
+      if (!window.confirm('Delete this inventory row? Quantity must be zero.')) return;
+      deleteMutation.mutate(inventoryId);
+    },
+    [deleteMutation]
+  );
+
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <>
       <section className="inventory-page stack-lg">
@@ -216,10 +294,7 @@ function AdminInventoryPageContent() {
           search={ui.search}
           onSearchChange={handleSearchChange}
           pageSize={ui.pageSize}
-          onPageSizeChange={(e) => {
-            ui.setPageSize(Number(e.target.value));
-            ui.setInventoryPage(1);
-          }}
+          onPageSizeChange={handlePageSizeChange}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
         />
 
@@ -235,14 +310,8 @@ function AdminInventoryPageContent() {
           deletePending={deleteMutation.isPending}
           onEdit={ui.openEditModal}
           onDelete={handleDelete}
-          onPreviousPage={() =>
-            ui.setInventoryPage(Math.max((inventoryPagination.current_page || 1) - 1, 1))
-          }
-          onNextPage={() =>
-            ui.setInventoryPage(
-              Math.min((inventoryPagination.current_page || 1) + 1, inventoryPagination.last_page || 1)
-            )
-          }
+          onPreviousPage={handlePreviousInventoryPage}
+          onNextPage={handleNextInventoryPage}
         />
 
         <InventoryHistoryTable
@@ -252,19 +321,10 @@ function AdminInventoryPageContent() {
           rows={historyRows}
           pagination={historyPagination}
           pageSize={ui.historyPageSize}
-          onPageSizeChange={(e) => {
-            ui.setHistoryPageSize(Number(e.target.value));
-            ui.setHistoryPage(1);
-          }}
+          onPageSizeChange={handleHistoryPageSizeChange}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
-          onPreviousPage={() =>
-            ui.setHistoryPage(Math.max((historyPagination.current_page || 1) - 1, 1))
-          }
-          onNextPage={() =>
-            ui.setHistoryPage(
-              Math.min((historyPagination.current_page || 1) + 1, historyPagination.last_page || 1)
-            )
-          }
+          onPreviousPage={handlePreviousHistoryPage}
+          onNextPage={handleNextHistoryPage}
         />
       </section>
 

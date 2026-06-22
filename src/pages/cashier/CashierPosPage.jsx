@@ -396,12 +396,6 @@ const virtualState = useMemo(() => {
         WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
       }}
     >
-      {productsLoading && !products.length ? (
-        <div className="page-loader" style={{ padding: '24px 0' }}>
-          Loading products...
-        </div>
-      ) : null}
-
       {!productsLoading && !products.length ? (
         <div className="card">
           <p>Empty.</p>
@@ -542,6 +536,7 @@ export default function CashierPosPage() {
 
   const loadStaticDataRef = useRef(null);
   const loadDraftsRef = useRef(null);
+  const loadCustomersRef = useRef(null);
   const loadBillingDetailRef = useRef(null);
 
   const hotkeyContextRef = useRef(null);
@@ -552,6 +547,9 @@ export default function CashierPosPage() {
 
   const [products, setProducts] = useState([]);
   const [drafts, setDrafts] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [customersLoading, setCustomersLoading] = useState(false);
+
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [search, setSearch] = useState('');
@@ -1038,6 +1036,33 @@ export default function CashierPosPage() {
   );
 
   /* =====================================================================
+   CUSTOMERS
+   ===================================================================== */
+const loadCustomers = useCallback(
+  async ({ silent = false } = {}) => {
+    if (!storeId) {
+      setCustomers([]);
+      return;
+    }
+    if (!silent) setCustomersLoading(true);
+
+    try {
+      const response = await customerService.list({ store_id: Number(storeId) });
+      const items = extractList(response);
+      setCustomers(items);
+    } catch (err) {
+      if (!silent) {
+        setError(err?.response?.data?.message || err?.message || 'Failed to load customers.');
+      }
+      setCustomers([]);
+    } finally {
+      if (!silent) setCustomersLoading(false);
+    }
+  },
+  [storeId]
+);
+
+  /* =====================================================================
      BILLING DETAIL
      ===================================================================== */
   const loadBillingDetail = useCallback(
@@ -1066,6 +1091,7 @@ export default function CashierPosPage() {
 
   loadStaticDataRef.current = loadStaticData;
   loadDraftsRef.current = loadDrafts;
+  loadCustomersRef.current = loadCustomers; 
   loadBillingDetailRef.current = loadBillingDetail;
 
   /* =====================================================================
@@ -1108,23 +1134,27 @@ export default function CashierPosPage() {
     };
   }, [selectedCustomerId, selectedCustomer]);
 
-  useEffect(() => {
-    if (!selectedCustomerId || !storeId) {
-      setLoyaltyRule(null);
-      return;
-    }
-
-    rewardService
-      .customerLoyalty({
-        store_id: Number(storeId),
-        customer_id: Number(selectedCustomerId),
-      })
-      .then((data) => {
-        setLoyaltyRule(data || null);
-      })
-      .catch(() => {
+useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!selectedCustomerId || !storeId) {
         setLoyaltyRule(null);
-      });
+        return;
+      }
+      try {
+        const data = await rewardService.customerLoyalty({
+          store_id: Number(storeId),
+          customer_id: Number(selectedCustomerId),
+        });
+        if (!cancelled) setLoyaltyRule(data || null);
+      } catch {
+        if (!cancelled) setLoyaltyRule(null);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedCustomerId, storeId]);
 
   /* =====================================================================
@@ -1160,6 +1190,7 @@ export default function CashierPosPage() {
     setError('');
     setSuccess('');
     setDrafts([]);
+    setCustomers([]); 
     setSearch('');
     setDraftSearch('');
     setActiveCategory('all');
@@ -1168,93 +1199,100 @@ export default function CashierPosPage() {
     resetProductState();
     resetCategoryState();
 
-    const bootstrap = async () => {
-      try {
-        setProductsLoading(true);
+const bootstrap = async () => {
+  try {
+    setProductsLoading(true);
+    await loadStaticDataRef.current();
+    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+    const productsResponse = await productService.list({
+      
+      store_id: Number(storeId),
+      page: 1,
+      is_active: true,
+    });
+    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
-        const [, , productsResponse] = await Promise.all([
-          loadStaticDataRef.current(),
-          loadDraftsRef.current({ silent: true }),
-          productService.list({ store_id: Number(storeId), page: 1, is_active: true }),
-        ]);
-
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-
-        productFiltersRef.current = {
-          storeId: String(storeId || ''),
-          activeCategoryId: null,
-          scopeKey: 'all',
-          search: '',
-        };
-
-        const meta = extractMeta(productsResponse);
-        const items = extractList(productsResponse);
-        const pageInfo = buildPageInfo(meta, items, 1);
-
-        const cacheKey = JSON.stringify({
-          storeId: String(storeId),
-          page: 1,
-          categoryScope: 'all',
-          categoryId: '',
-          search: '',
-        });
-
-        productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
-        setProducts(items);
-        setProductPageInfo(pageInfo);
-        setCurrentPage(1);
-
-        bootstrapProductsFetchedRef.current = true;
-
-        lastProductFilterRef.current = JSON.stringify({
-          storeId: String(storeId),
-          categoryScope: 'all',
-          search: '',
-        });
-
-        if (!cancelled && bootstrapId === bootstrapRequestId.current) {
-          bootstrappedRef.current = true;
-          setCatalogReady(true);
-
-          const key = cartStorageKey(storeId, user?.user_id);
-          cartStorageKeyRef.current = key;
-          const saved = safeLoadCart(key);
-
-          if (saved?.billing?.items?.length) {
-            if (saved.billing.billing_id) {
-              try {
-                await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
-              } catch {
-                const restored = recalcBillingTotals({
-                  ...buildEmptyLocalBilling(),
-                  ...saved.billing,
-                  billing_id: null,
-                  __local: true,
-                });
-                setBilling(restored);
-                setSelectedCustomerId(saved.selectedCustomerId || '');
-                setNotes(saved.notes || '');
-              }
-            } else {
-              const restored = recalcBillingTotals({
-                ...buildEmptyLocalBilling(),
-                ...saved.billing,
-                __local: true,
-              });
-              setBilling(restored);
-              setSelectedCustomerId(saved.selectedCustomerId || '');
-              setNotes(saved.notes || '');
-            }
-          }
-
-          hydratedFromStorageRef.current = true;
-        }
-      } catch (err) {
-        if (!cancelled) console.error('POS init failed:', err);
-      } finally {
-        if (!cancelled) setProductsLoading(false);
-      }
+    productFiltersRef.current = {
+      storeId: String(storeId || ''),
+      activeCategoryId: null,
+      scopeKey: 'all',
+      search: '',
     };
+
+    const meta = extractMeta(productsResponse);
+    const items = extractList(productsResponse);
+    const pageInfo = buildPageInfo(meta, items, 1);
+
+    const cacheKey = JSON.stringify({
+      storeId: String(storeId),
+      page: 1,
+      categoryScope: 'all',
+      categoryId: '',
+      search: '',
+    });
+
+    productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
+    setProducts(items);
+    setProductPageInfo(pageInfo);
+    setCurrentPage(1);
+
+    bootstrapProductsFetchedRef.current = true;
+ lastProductFilterRef.current = JSON.stringify({
+  storeId: String(storeId || ''),
+  categoryScope: 'all',         // effectiveCategoryScopeKey when activeCategory === 'all'
+  search: '',                   // debouncedSearch.toLowerCase() when search is empty
+});
+
+    bootstrappedRef.current = true;
+    setCatalogReady(true);
+
+    // 3) Customers only after products have resolved.
+await loadCustomersRef.current({ silent: true });
+if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+    // 4) Drafts after the catalog is usable — sequential, not raced against products.
+    await loadDraftsRef.current({ silent: true });
+    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+    // 5) Cart hydration runs last.
+    const key = cartStorageKey(storeId, user?.user_id);
+    cartStorageKeyRef.current = key;
+    const saved = safeLoadCart(key);
+
+    if (saved?.billing?.items?.length) {
+      if (saved.billing.billing_id) {
+        try {
+          await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
+        } catch {
+          const restored = recalcBillingTotals({
+            ...buildEmptyLocalBilling(),
+            ...saved.billing,
+            billing_id: null,
+            __local: true,
+          });
+          setBilling(restored);
+          setSelectedCustomerId(saved.selectedCustomerId || '');
+          setNotes(saved.notes || '');
+        }
+      } else {
+        const restored = recalcBillingTotals({
+          ...buildEmptyLocalBilling(),
+          ...saved.billing,
+          __local: true,
+        });
+        setBilling(restored);
+        setSelectedCustomerId(saved.selectedCustomerId || '');
+        setNotes(saved.notes || '');
+      }
+    }
+
+    hydratedFromStorageRef.current = true;
+  } catch (err) {
+    if (!cancelled) console.error('POS init failed:', err);
+  } finally {
+    if (!cancelled) setProductsLoading(false);
+  }
+};
 
     bootstrap();
 
@@ -1263,48 +1301,53 @@ export default function CashierPosPage() {
     };
   }, [storeId, user?.user_id, resetSale, resetProductState, resetCategoryState]);
 
-  /* ----- PRODUCTS RELOAD --------------------------------------------- */
-  useEffect(() => {
-    if (!storeId || !bootstrappedRef.current || !catalogReady) return;
+/* ----- PRODUCTS RELOAD --------------------------------------------- */
+useEffect(() => {
+  if (!storeId || !bootstrappedRef.current || !catalogReady) return;
 
-    if (bootstrapProductsFetchedRef.current) {
-      bootstrapProductsFetchedRef.current = false;
-      return;
-    }
+  // Bootstrap already loaded page 1 — skip this render, clear the flag
+  if (bootstrapProductsFetchedRef.current) {
+    bootstrapProductsFetchedRef.current = false;
+    lastProductFilterRef.current = currentFilterSignature; // ✅ sync signature NOW
+    return;
+  }
 
-    const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
+  const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
-    if (filtersChanged) {
-      prefetchedKeysRef.current.clear();
+  if (!filtersChanged && currentPage === productPageInfo.currentPage) {
+    return; // ✅ nothing actually changed, don't re-fetch
+  }
 
-      if (currentPage !== 1) {
-        setCurrentPage(1);
-        lastProductFilterRef.current = currentFilterSignature;
-        return;
-      }
-
+  if (filtersChanged) {
+    prefetchedKeysRef.current.clear();
+    if (currentPage !== 1) {
+      setCurrentPage(1);
       lastProductFilterRef.current = currentFilterSignature;
-      void loadProducts(1);
       return;
     }
+    lastProductFilterRef.current = currentFilterSignature;
+    void loadProducts(1);
+    return;
+  }
 
-    void loadProducts(currentPage);
-  }, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady]);
+  void loadProducts(currentPage);
+}, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady, productPageInfo.currentPage]);
 
-  /* ----- PRODUCT PREFETCH -------------------------------------------- */
-  useEffect(() => {
-    if (!bootstrappedRef.current || !catalogReady) return;
-    if (productsLoading) return;
-    if (!productPageInfo.hasNextPage) return;
+ /* ----- PRODUCT PREFETCH -------------------------------------------- */
+useEffect(() => {
+  if (!bootstrappedRef.current || !catalogReady) return;
+  if (productsLoading) return;
+  if (!productPageInfo.hasNextPage) return;
+  if (bootstrapProductsFetchedRef.current) return; // ✅ ADD THIS LINE
 
-    void prefetchNextPage(productPageInfo.currentPage + 1);
-  }, [
-    productPageInfo.currentPage,
-    productPageInfo.hasNextPage,
-    prefetchNextPage,
-    productsLoading,
-    catalogReady,
-  ]);
+  void prefetchNextPage(productPageInfo.currentPage + 1);
+}, [
+  productPageInfo.currentPage,
+  productPageInfo.hasNextPage,
+  prefetchNextPage,
+  productsLoading,
+  catalogReady,
+]);
 
   /* =====================================================================
      BILLING MUTATIONS
@@ -1942,16 +1985,6 @@ export default function CashierPosPage() {
   /* =====================================================================
      EARLY RETURNS
      ===================================================================== */
-  if (storeLoading) {
-    return (
-      <section className="pos-grid cashier-pos-page">
-        <div className="pos-catalog stack-lg">
-          <div className="page-loader">Loading stores...</div>
-        </div>
-      </section>
-    );
-  }
-
   if (!stores.length) {
     return (
       <section className="pos-grid cashier-pos-page">
@@ -2077,15 +2110,22 @@ export default function CashierPosPage() {
             </div>
           </div>
 
-          {catalogLoading ? (
-            <div className="page-loader">Loading POS...</div>
-          ) : (
+{catalogLoading ? (
+  <div className="page-loader">
+    <div className="pos-spinner-wrap">
+      <div className="spinner" />
+      <span className="pos-spinner-label">Loading...</span>
+    </div>
+  </div>
+) : (
             <>
               {error ? <div className="form-error">{error}</div> : null}
               {success ? <div className="form-success">{success}</div> : null}
-              {productsLoading && products.length ? (
-                <div className="inline-note-spinner">Refreshing products...</div>
-              ) : null}
+             {/* {productsLoading && products.length ? (
+  <div className="inline-note-spinner">
+    <div className="spinner spinner--sm" />
+  </div>
+) : null} */}
 
               <VirtualizedProductGrid
                 products={products}
@@ -2405,6 +2445,8 @@ export default function CashierPosPage() {
         currentStore={currentStore}
         currency={currency}
         onSelectCustomer={handleCustomerSelect}
+         customers={customers}              // 👈 add this line
+       customersLoading={customersLoading}
       />
     </>
   );

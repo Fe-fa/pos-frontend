@@ -1,4 +1,11 @@
-export default function PaginationControls({ pagination, isFetching, onPrevious, onNext }) {
+import { memo } from 'react';
+
+const PaginationControls = memo(function PaginationControls({
+  pagination,
+  isFetching,
+  onPrevious,
+  onNext,
+}) {
   return (
     <div
       className="row-actions"
@@ -6,20 +13,31 @@ export default function PaginationControls({ pagination, isFetching, onPrevious,
     >
       <span className="muted">
         {pagination.from && pagination.to
-          ? `Showing ${pagination.from}-${pagination.to} of ${pagination.total}`
+          ? `Showing ${pagination.from}–${pagination.to} of ${pagination.total}`
           : `Page ${pagination.current_page || 1} of ${pagination.last_page || 1}`}
       </span>
 
       <div className="row-actions compact">
-        <button onClick={onPrevious} disabled={isFetching || !pagination.has_prev_page}>
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={onPrevious}
+          disabled={isFetching || !pagination.has_prev_page}
+        >
           Previous
         </button>
 
-        <button onClick={onNext} disabled={isFetching || !pagination.has_next_page}>
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={onNext}
+          disabled={isFetching || !pagination.has_next_page}
+        >
           Next
         </button>
       </div>
     </div>
   );
-}
+});
 
+export default PaginationControls;

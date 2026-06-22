@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, X, Edit, Trash2, ChevronDown } from 'lucide-react';
+import { Plus, X, Edit, Trash2, ChevronDown, Loader2 } from 'lucide-react';
 import { categoryService } from '../../services/categoryService';
 import { productService } from '../../services/productService';
 import { currency } from '../../utils/helpers';
@@ -11,6 +11,12 @@ import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 const IMAGE_BASE_URL =
   import.meta.env.VITE_STORAGE_URL ||
   `${import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'}/storage/`;
+
+// Fallback options shown in the per-page dropdown before we know the
+// backend's actual default (ProductController defaults to 14). The real
+// default, once known from a response's meta.per_page, is merged into this
+// list so the dropdown always has a matching option even if it isn't here.
+const PER_PAGE_OPTIONS = [12, 24, 48, 100];
 
 const initialForm = {
   category_id: '',
@@ -431,15 +437,28 @@ export default function AdminProductsPage() {
   const [meta, setMeta] = useState({ ...EMPTY_META });
   const [categories, setCategories] = useState([]);
 
-  const [perPage, setPerPage] = useState(12);
+  // `perPage` is intentionally undefined until the user explicitly picks a
+  // value from the dropdown. While undefined, we never send per_page to the
+  // backend, so the backend's own default (currently 14) governs. This is
+  // also the only per-page state the load depends on, so the value learned
+  // back from the server (effectivePerPage below) never triggers a
+  // redundant second fetch.
+  const [perPage, setPerPage] = useState(undefined);
+
+  // Purely for display (dropdown value). Synced from meta.per_page after
+  // every successful load so the dropdown reflects the backend's true
+  // default until the user overrides it.
+  const [effectivePerPage, setEffectivePerPage] = useState(undefined);
+
   const [page, setPage] = useState(1);
 
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...initialForm });
   const [editingId, setEditingId] = useState(null);
 
-  const [initialLoading, setInitialLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  // Single loading flag drives the overlay spinner (replaces the old
+  // initialLoading / refreshing split with one consistent affordance).
+  const [loading, setLoading] = useState(false);
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim(), 220);
@@ -447,9 +466,16 @@ export default function AdminProductsPage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const productsRequestRef = useRef(0);
   const categoriesRequestRef = useRef(0);
-  const hasLoadedOnceRef = useRef(false);
+  const prevStoreIdRef = useRef(storeId);
+
+  // Ensures product fetches run one at a time, in order. If a new load
+  // request comes in while one is in flight (e.g. fast Previous/Next
+  // clicks, or a debounce firing mid-request), only the latest queued
+  // request runs once the current one finishes — preventing an older,
+  // slower response from overwriting newer state.
+  const pendingParamsRef = useRef(null);
+  const inFlightRef = useRef(false);
 
   const previewSrc = useMemo(() => {
     if (form.clear_image) return '';
@@ -463,16 +489,6 @@ export default function AdminProductsPage() {
     form.image_preview,
     form.image_url_input,
   ]);
-
-  const productParams = useMemo(
-    () => ({
-      page,
-      store_id: storeId,
-      per_page: perPage,
-      ...(debouncedSearch ? { search: debouncedSearch } : {}),
-    }),
-    [page, storeId, perPage, debouncedSearch]
-  );
 
   const updateFormField = useCallback((field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -562,99 +578,145 @@ export default function AdminProductsPage() {
     });
   }, []);
 
-  const loadProducts = useCallback(
-    async ({ silent = false } = {}) => {
-      if (!storeId) {
-        setProducts([]);
-        setMeta({ ...EMPTY_META });
-        setInitialLoading(false);
-        setRefreshing(false);
-        hasLoadedOnceRef.current = false;
-        return;
+  // ── Sequential, queued product loader (async/await throughout) ──────────
+  const runLoadProducts = useCallback(async ({ storeId: targetStoreId, page: targetPage, search: targetSearch, perPage: targetPerPage }) => {
+    if (!targetStoreId) {
+      setProducts([]);
+      setMeta({ ...EMPTY_META });
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const params = {
+        page: targetPage,
+        store_id: targetStoreId,
+        ...(targetSearch ? { search: targetSearch } : {}),
+        // Only send per_page once the user has explicitly chosen one.
+        // Otherwise omit it entirely so the backend's own default applies.
+        ...(targetPerPage != null ? { per_page: targetPerPage } : {}),
+      };
+
+      const response = await productService.list(params);
+
+      // extractPaginated's second arg is just a fallback for malformed
+      // responses, not the value that should govern requests, so pass
+      // targetPerPage (which may be undefined) rather than a hardcoded const.
+      const parsed = extractPaginated(response, targetPerPage);
+      setProducts(parsed.data || []);
+      setMeta(parsed.meta || { ...EMPTY_META });
+
+      // Learn the real per-page in effect from the server's own meta,
+      // independent of whatever the user picked, so the dropdown always
+      // reflects what was actually applied.
+      if (parsed.meta?.per_page != null) {
+        setEffectivePerPage(parsed.meta.per_page);
       }
+    } catch (err) {
+      setError(formatApiError(err) || 'Unable to load products.');
+      setProducts([]);
+      setMeta({ ...EMPTY_META });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-      const requestId = ++productsRequestRef.current;
-      const firstLoad = !hasLoadedOnceRef.current && !silent;
-
-      if (firstLoad) {
-        setInitialLoading(true);
-      } else {
-        setRefreshing(true);
-      }
-
-      setError('');
-
-      try {
-        const response = await productService.list(productParams);
-        if (requestId !== productsRequestRef.current) return;
-
-        const parsed = extractPaginated(response, perPage);
-        setProducts(parsed.data || []);
-        setMeta(parsed.meta || { ...EMPTY_META });
-        hasLoadedOnceRef.current = true;
-      } catch (err) {
-        if (requestId !== productsRequestRef.current) return;
-
-        setError(formatApiError(err) || 'Unable to load products.');
-
-        if (!hasLoadedOnceRef.current) {
-          setProducts([]);
-          setMeta({ ...EMPTY_META });
-        }
-      } finally {
-        if (requestId === productsRequestRef.current) {
-          setInitialLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [storeId, productParams, perPage]
-  );
-
-  const reloadProducts = useCallback(async () => {
-    await loadProducts({ silent: true });
-  }, [loadProducts]);
-
-  useEffect(() => {
-    loadProducts();
-  }, [loadProducts]);
-
-  useEffect(() => {
-    const run = async () => {
-      if (!storeId) {
-        setCategories([]);
-        return;
-      }
-
-      const requestId = ++categoriesRequestRef.current;
-
-      try {
-        const categoriesRes = await categoryService.list({
-          store_id: storeId,
-          per_page: 100,
-        });
-
-        if (requestId !== categoriesRequestRef.current) return;
-        setCategories(extractList(categoriesRes));
-      } catch {
-        if (requestId !== categoriesRequestRef.current) return;
-        setCategories([]);
-      }
+  const loadProducts = useCallback(async (params = {}) => {
+    const callParams = {
+      storeId: params.storeId ?? storeId,
+      page: params.page ?? page,
+      search: 'search' in params ? params.search : debouncedSearch,
+      perPage: 'perPage' in params ? params.perPage : perPage,
     };
 
-    run();
-  }, [storeId]);
+    if (inFlightRef.current) {
+      pendingParamsRef.current = callParams;
+      return;
+    }
+
+    inFlightRef.current = true;
+    let current = callParams;
+
+    while (current) {
+      // eslint-disable-next-line no-await-in-loop
+      await runLoadProducts(current);
+      if (pendingParamsRef.current) {
+        current = pendingParamsRef.current;
+        pendingParamsRef.current = null;
+      } else {
+        current = null;
+      }
+    }
+
+    inFlightRef.current = false;
+  }, [storeId, page, debouncedSearch, perPage, runLoadProducts]);
+
+  // ── Categories loader (await fully resolved before commit, as before) ───
+  const loadCategories = useCallback(async (targetStoreId) => {
+    if (!targetStoreId) {
+      setCategories([]);
+      return;
+    }
+
+    const requestId = ++categoriesRequestRef.current;
+
+    try {
+      const categoriesRes = await categoryService.list({
+        store_id: targetStoreId,
+        per_page: 100,
+      });
+
+      if (requestId !== categoriesRequestRef.current) return;
+      setCategories(extractList(categoriesRes));
+    } catch {
+      if (requestId !== categoriesRequestRef.current) return;
+      setCategories([]);
+    }
+  }, []);
+
+  // Single source of truth for fetching. Runs whenever storeId,
+  // debouncedSearch, page, or perPage change. perPage only changes here
+  // when the user explicitly picks a value — the backend-learned
+  // `effectivePerPage` is deliberately NOT a dependency, so syncing the
+  // dropdown after a response never causes a second, redundant fetch.
+  useEffect(() => {
+    const storeChanged = prevStoreIdRef.current !== storeId;
+    prevStoreIdRef.current = storeId;
+
+    if (storeChanged) {
+      setProducts([]);
+      setMeta({ ...EMPTY_META });
+      setCategories([]);
+      setShowModal(false);
+      resetForm();
+      setError('');
+
+      // Let the new store's load pick up the backend default again,
+      // rather than carrying over a per_page chosen for the old store.
+      if (search !== '' || page !== 1 || perPage !== undefined) {
+        setSearch('');
+        setPage(1);
+        setPerPage(undefined);
+        setEffectivePerPage(undefined);
+        return;
+      }
+
+      if (!storeId) setLoading(false);
+    }
+
+    loadProducts({ storeId, page, search: debouncedSearch, perPage });
+    loadCategories(storeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, debouncedSearch, page, perPage]);
 
   useEffect(() => {
     return () => {
       revokeBlobUrl(form.image_preview);
     };
   }, [form.image_preview]);
-
-  useEffect(() => {
-    setShowModal(false);
-    resetForm();
-  }, [storeId, resetForm]);
 
   const handleSubmit = useCallback(
     async (e) => {
@@ -697,7 +759,7 @@ export default function AdminProductsPage() {
         if (!editingId && page !== 1) {
           setPage(1);
         } else {
-          await reloadProducts();
+          await loadProducts({ storeId, page, search: debouncedSearch, perPage });
         }
       } catch (err) {
         setError(formatApiError(err));
@@ -705,7 +767,7 @@ export default function AdminProductsPage() {
         setSubmitting(false);
       }
     },
-    [storeId, form, editingId, page, reloadProducts, resetForm]
+    [storeId, form, editingId, page, debouncedSearch, perPage, loadProducts, resetForm]
   );
 
   const handleEdit = useCallback((product) => {
@@ -750,13 +812,13 @@ export default function AdminProductsPage() {
         if (products.length === 1 && page > 1) {
           setPage((prev) => prev - 1);
         } else {
-          await reloadProducts();
+          await loadProducts({ storeId, page, search: debouncedSearch, perPage });
         }
       } catch (err) {
         setError(formatApiError(err) || 'Unable to delete product.');
       }
     },
-    [products.length, page, reloadProducts]
+    [products.length, page, storeId, debouncedSearch, perPage, loadProducts]
   );
 
   const handleSearchChange = useCallback((e) => {
@@ -767,7 +829,8 @@ export default function AdminProductsPage() {
 
   const handlePerPageChange = useCallback((e) => {
     const nextPerPage = Number(e.target.value);
-    setPerPage((prev) => (prev === nextPerPage ? prev : nextPerPage));
+    setPerPage(nextPerPage);
+    setEffectivePerPage(nextPerPage);
     setPage(1);
   }, []);
 
@@ -794,175 +857,193 @@ export default function AdminProductsPage() {
     [products, currentStore?.currency, canManage, handleEdit, handleDelete]
   );
 
+  // Whatever is currently in effect (user choice, or backend-learned
+  // default once known), for the dropdown's value.
+  const displayedPerPage = effectivePerPage ?? meta.per_page ?? '';
+
+  // Ensure the dropdown always has an option matching the current value,
+  // even if it isn't one of the hardcoded common choices (e.g. backend
+  // default of 14 isn't in PER_PAGE_OPTIONS).
+  const perPageOptions = useMemo(() => {
+    const opts = new Set(PER_PAGE_OPTIONS);
+    if (displayedPerPage !== '') opts.add(Number(displayedPerPage));
+    return Array.from(opts).sort((a, b) => a - b);
+  }, [displayedPerPage]);
+
   return (
     <>
-      <section className="stack-lg">
-        <div
-          className="catalog-hero"
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            width: '100%',
-          }}
-        >
-          <div
-            className="catalog-hero-copy"
-            style={{ display: 'flex', flexDirection: 'column' }}
-          >
-            <h2 className="catalog-title">Products</h2>
-            <p className="catalog-subtitle">
-              {meta.from && meta.to
-                ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
-                : `${products.length} products in catalog`}
-              {refreshing && products.length ? ' • refreshing...' : ''}
-            </p>
+      <style>{`
+        @keyframes products-spin { to { transform: rotate(360deg); } }
+        .spin-icon { animation: products-spin 0.8s linear infinite; }
+        .products-page-wrapper { position: relative; }
+        .products-loading-overlay {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(255, 255, 255, 0.55);
+          z-index: 20;
+          border-radius: 12px;
+          pointer-events: none;
+        }
+      `}</style>
+
+      <div className="products-page-wrapper">
+        {loading ? (
+          <div className="products-loading-overlay">
+            <Loader2 size={32} className="spin-icon" />
           </div>
+        ) : null}
 
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={openCreateModal}
-            disabled={!storeId || !canManage}
-          >
-            <Plus size={18} />
-            New product
-          </button>
-        </div>
-
-        <div className="catalog-toolbar">
-          <label className="catalog-search">
-            <input
-              className="text-input"
-              type="text"
-              placeholder="Search product"
-              value={search}
-              onChange={handleSearchChange}
-              disabled={!storeId}
-            />
-          </label>
-
+        <section className="stack-lg">
           <div
+            className="catalog-hero"
             style={{
-              position: 'relative',
-              display: 'inline-flex',
+              display: 'flex',
+              justifyContent: 'space-between',
               alignItems: 'center',
+              width: '100%',
             }}
           >
-            <ChevronDown
-              size={14}
-              style={{
-                position: 'absolute',
-                right: 8,
-                pointerEvents: 'none',
-                color: 'var(--color-text-secondary)',
-              }}
-            />
-            <select
-              className="text-input"
-              value={perPage}
-              onChange={handlePerPageChange}
-              disabled={!storeId}
-              style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
-            >
-              {[12, 24, 48, 100].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
-        </div>
-
-        {error && !showModal ? <p className="form-error">{error}</p> : null}
-
-        <article className="catalog-table-card" style={{ position: 'relative' }}>
-          {refreshing && products.length ? (
             <div
-              className="muted"
-              style={{
-                position: 'absolute',
-                top: 10,
-                right: 16,
-                fontSize: 12,
-                zIndex: 2,
-              }}
+              className="catalog-hero-copy"
+              style={{ display: 'flex', flexDirection: 'column' }}
             >
-              Refreshing…
+              <h2 className="catalog-title">Products</h2>
+              <p className="catalog-subtitle">
+                {meta.from && meta.to
+                  ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
+                  : `${products.length} products in catalog`}
+              </p>
             </div>
-          ) : null}
 
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Image</th>
-                  <th>Product</th>
-                  <th>Category</th>
-                  <th>Pricing</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {!storeId ? (
-                  <tr>
-                    <td colSpan="6">Select a store first.</td>
-                  </tr>
-                ) : initialLoading && !products.length ? (
-                  <tr>
-                    <td colSpan="6">Loading...</td>
-                  </tr>
-                ) : products.length ? (
-                  tableRows
-                ) : (
-                  <tr>
-                    <td colSpan="6">No products found.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={openCreateModal}
+              disabled={!storeId || !canManage}
+            >
+              <Plus size={18} />
+              New product
+            </button>
           </div>
 
-          {storeId ? (
+          <div className="catalog-toolbar">
+            <label className="catalog-search">
+              <input
+                className="text-input"
+                type="text"
+                placeholder="Search product"
+                value={search}
+                onChange={handleSearchChange}
+                disabled={!storeId}
+              />
+            </label>
+
             <div
-              className="row-actions"
               style={{
-                justifyContent: 'space-between',
+                position: 'relative',
+                display: 'inline-flex',
                 alignItems: 'center',
-                marginTop: 16,
               }}
             >
-              <span className="muted">
-                Page {meta.current_page || 1} of {meta.last_page || 1}
-              </span>
-
-              <div className="row-actions compact">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handlePrevPage}
-                  disabled={!meta.has_prev_page || initialLoading || refreshing}
-                >
-                  Previous
-                </button>
-
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handleNextPage}
-                  disabled={!meta.has_next_page || initialLoading || refreshing}
-                >
-                  Next
-                </button>
-              </div>
+              <ChevronDown
+                size={14}
+                style={{
+                  position: 'absolute',
+                  right: 8,
+                  pointerEvents: 'none',
+                  color: 'var(--color-text-secondary)',
+                }}
+              />
+              <select
+                className="text-input"
+                value={displayedPerPage}
+                onChange={handlePerPageChange}
+                disabled={!storeId}
+                style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
+              >
+                {perPageOptions.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
             </div>
-          ) : null}
-        </article>
-      </section>
+
+            <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
+          </div>
+
+          {error && !showModal ? <p className="form-error">{error}</p> : null}
+
+          <article className="catalog-table-card">
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Image</th>
+                    <th>Product</th>
+                    <th>Category</th>
+                    <th>Pricing</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {!storeId ? (
+                    <tr>
+                      <td colSpan="6">Select a store first.</td>
+                    </tr>
+                  ) : products.length ? (
+                    tableRows
+                  ) : !loading ? (
+                    <tr>
+                      <td colSpan="6">No products found.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            {storeId ? (
+              <div
+                className="row-actions"
+                style={{
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginTop: 16,
+                }}
+              >
+                <span className="muted">
+                  Page {meta.current_page || 1} of {meta.last_page || 1}
+                </span>
+
+                <div className="row-actions compact">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={handlePrevPage}
+                    disabled={!meta.has_prev_page || loading}
+                  >
+                    Previous
+                  </button>
+
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={handleNextPage}
+                    disabled={!meta.has_next_page || loading}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </article>
+        </section>
+      </div>
 
       <ProductModal
         show={showModal}

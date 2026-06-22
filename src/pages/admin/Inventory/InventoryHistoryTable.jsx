@@ -1,5 +1,42 @@
+import { memo } from 'react';
 import { getHistoryTone, formatSignedQty } from './inventoryHelpers';
 import PaginationControls from './PaginationControls';
+import Spinner from './Spinner';
+
+// ─── HistoryRow ───────────────────────────────────────────────────────────────
+
+const HistoryRow = memo(function HistoryRow({ row }) {
+  return (
+    <tr>
+      <td>{row.created_at ? new Date(row.created_at).toLocaleString() : '-'}</td>
+      <td>
+        <div className="catalog-item-copy">
+          <strong>{row.product?.product_name || 'Unknown product'}</strong>
+          <span>{row.product?.sku || 'No SKU'}</span>
+        </div>
+      </td>
+      <td>{row.batch_no || '—'}</td>
+      <td>
+        <span className={`history-change-pill ${getHistoryTone(row.quantity_changed)}`}>
+          {formatSignedQty(row.quantity_changed)}
+        </span>
+      </td>
+      <td>{row.quantity_before ?? 0}</td>
+      <td>{row.quantity_after ?? 0}</td>
+      <td>{row.change_type || '-'}</td>
+      <td>
+        <div className="catalog-item-copy">
+          <strong>{row.reference || '—'}</strong>
+          <span>
+            {row.user?.full_name || row.user?.name || row.user?.email || 'System'}
+          </span>
+        </div>
+      </td>
+    </tr>
+  );
+});
+
+// ─── InventoryHistoryTable ────────────────────────────────────────────────────
 
 export default function InventoryHistoryTable({
   storeId,
@@ -13,6 +50,12 @@ export default function InventoryHistoryTable({
   onPreviousPage,
   onNextPage,
 }) {
+  // Merge backend default into the preset list, deduped + sorted.
+  const resolvedOptions =
+    pageSize !== null
+      ? [...new Set([...pageSizeOptions, pageSize])].sort((a, b) => a - b)
+      : pageSizeOptions;
+
   return (
     <article className="catalog-table-card">
       <div
@@ -29,17 +72,36 @@ export default function InventoryHistoryTable({
           <h3 className="catalog-title" style={{ fontSize: '1.05rem' }}>
             Inventory history
           </h3>
-          <p className="catalog-subtitle">{isFetching && rows.length ? 'Refreshing history...' : ''}</p>
+          <p
+            className="catalog-subtitle"
+            style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 20 }}
+          >
+            {isFetching && rows.length > 0 && (
+              <>
+                <Spinner size={12} style={{ color: 'var(--color-text-secondary)' }} />
+                Refreshing history…
+              </>
+            )}
+          </p>
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="muted">Show</span>
-          <select className="select-input" value={pageSize} onChange={onPageSizeChange} disabled={!storeId}>
-            {pageSizeOptions.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
+          <select
+            className="select-input"
+            value={pageSize ?? ''}
+            onChange={onPageSizeChange}
+            disabled={!storeId || pageSize === null}
+          >
+            {pageSize === null ? (
+              <option value="">Loading…</option>
+            ) : (
+              resolvedOptions.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))
+            )}
           </select>
         </label>
       </div>
@@ -68,36 +130,16 @@ export default function InventoryHistoryTable({
               </tr>
             ) : isLoading && !rows.length ? (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell">
-                  Loading history...
+                <td colSpan="8" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
+                  <Spinner
+                    size={20}
+                    style={{ margin: '0 auto', display: 'block', color: 'var(--color-text-secondary)' }}
+                  />
                 </td>
               </tr>
             ) : rows.length ? (
               rows.map((row) => (
-                <tr key={row.inventory_history_id}>
-                  <td>{row.created_at ? new Date(row.created_at).toLocaleString() : '-'}</td>
-                  <td>
-                    <div className="catalog-item-copy">
-                      <strong>{row.product?.product_name || 'Unknown product'}</strong>
-                      <span>{row.product?.sku || 'No SKU'}</span>
-                    </div>
-                  </td>
-                  <td>{row.batch_no || '—'}</td>
-                  <td>
-                    <span className={`history-change-pill ${getHistoryTone(row.quantity_changed)}`}>
-                      {formatSignedQty(row.quantity_changed)}
-                    </span>
-                  </td>
-                  <td>{row.quantity_before ?? 0}</td>
-                  <td>{row.quantity_after ?? 0}</td>
-                  <td>{row.change_type || '-'}</td>
-                  <td>
-                    <div className="catalog-item-copy">
-                      <strong>{row.reference || '—'}</strong>
-                      <span>{row.user?.full_name || row.user?.name || row.user?.email || 'System'}</span>
-                    </div>
-                  </td>
-                </tr>
+                <HistoryRow key={row.inventory_history_id} row={row} />
               ))
             ) : (
               <tr>

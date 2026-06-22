@@ -7,6 +7,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import { useMemo } from 'react';
 
 // Admin nav — all pages, no permission filter needed (admin has everything)
 const adminNavItems = [
@@ -52,13 +53,18 @@ export default function AdminLayout() {
   const navItems = (isAdmin ? adminNavItems : managerNavItems).filter(
     (item) => !item.permission || can(item.permission)
   );
+    const currentStore = useMemo(
+  () => stores.find((store) => String(store.store_id) === String(storeId)),
+  [stores, storeId]
+);
 
   const handleLogout = async () => {
     await logout();
     navigate('/login');
   };
 
-  return (
+
+return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
@@ -66,7 +72,7 @@ export default function AdminLayout() {
             <Coffee size={20} />
           </div>
           <div>
-            <h1>swiftstock</h1>
+            <p className="brand-store-name">{currentStore?.store_name || 'All Stores'}</p>
             <p>{isAdmin ? 'System Admin' : 'Store Manager'}</p>
           </div>
         </div>

@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { ChevronDown } from 'lucide-react';
 import Modal from '../../components/common/Modal';
 import { useStore } from '../../contexts/StoreContext';
 import { billingService } from '../../services/billingService';
@@ -9,72 +10,129 @@ import { extractPaginated, EMPTY_META } from '../../utils/pagination';
 import { useAuth } from '../../contexts/AuthContext';
 
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50, 100];
-const DEFAULT_PER_PAGE = 10;
-
-const extractRecord = (response) => {
-  return response?.data?.data || response?.data || response || null;
-};
+const SPINNER_STYLE = `@keyframes billing-spin { to { transform: rotate(360deg); } }`;
+const extractRecord = (response) =>
+  response?.data?.data || response?.data || response || null;
 
 const getSortedPayments = (billing) => {
-  const payments = Array.isArray(billing?.payments) ? [...billing.payments] : [];
-  if (!payments.length) return [];
-
-  payments.sort(
+  if (!Array.isArray(billing?.payments) || !billing.payments.length) return [];
+  return [...billing.payments].sort(
     (a, b) =>
       new Date(b?.payment_date || 0).getTime() - new Date(a?.payment_date || 0).getTime()
   );
-
-  return payments;
 };
 
-const getLatestPayment = (billing) => {
-  const payments = getSortedPayments(billing);
-  return payments[0] || null;
-};
-
-const getLatestReceiptNumber = (billing) => {
-  const payments = getSortedPayments(billing);
-  return payments[0]?.receiptnumber || null;
-};
+const getLatestPayment = (billing) => getSortedPayments(billing)[0] || null;
 
 const getBillingDisplayRef = (billing) => {
   if (!billing) return '-';
-
+  const latestReceipt = getSortedPayments(billing)[0]?.receiptnumber || null;
   if (billing.status === 'paid') {
-    return (
-      getLatestReceiptNumber(billing) ||
-      billing.invnumber ||
-      `Draft #${billing.billing_id}`
-    );
+    return latestReceipt || billing.invnumber || `Draft #${billing.billing_id}`;
   }
-
   return billing.invnumber || `Draft #${billing.billing_id}`;
 };
 
-function useDebouncedValue(value, delay = 250) {
-  const [debouncedValue, setDebouncedValue] = useState(value);
+// ─── Reducer: all page state in one place, single re-render per action ──────
+const INITIAL_STATE = {
+  billings: [],
+  meta: { ...EMPTY_META },
+  page: 1,
+  perPage: undefined,
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebouncedValue(value);
-    }, delay);
+  effectivePerPage: undefined,
+  loading: false,
+  status: '',
+  scope: 'active',
+  selectedBilling: null,
+  detailsLoading: false,
+  error: '',
+  success: '',
+  submitting: false,
+};
 
-    return () => window.clearTimeout(timer);
-  }, [value, delay]);
-
-  return debouncedValue;
+function reducer(state, action) {
+  switch (action.type) {
+    case 'RESET_FOR_STORE':
+      return { ...INITIAL_STATE };
+    case 'SET_LOADING':
+      return { ...state, loading: action.payload, error: '' };
+    case 'LOAD_SUCCESS':
+      return {
+        ...state,
+        loading: false,
+        billings: action.billings,
+        meta: action.meta,
+        // Learn the real per-page in effect from the server's own meta,
+        // independent of whatever the user picked (or didn't pick), so the
+        // dropdown always reflects what was actually applied.
+        effectivePerPage: action.meta?.per_page != null ? action.meta.per_page : state.effectivePerPage,
+      };
+    case 'LOAD_ERROR':
+      return { ...state, loading: false, error: action.payload };
+    case 'SET_PAGE':
+      return { ...state, page: action.payload };
+    case 'SET_PER_PAGE':
+      // User explicitly chose a value: drives both the request and the display.
+      return { ...state, perPage: action.payload, effectivePerPage: action.payload, page: 1 };
+    case 'SET_STATUS':
+      return { ...state, status: action.payload, page: 1 };
+    case 'SET_SCOPE':
+      return { ...state, scope: action.payload, page: 1 };
+    case 'OPEN_DETAILS_START':
+      return { ...state, detailsLoading: true, error: '' };
+    case 'OPEN_DETAILS_SUCCESS':
+      return { ...state, detailsLoading: false, selectedBilling: action.payload };
+    case 'OPEN_DETAILS_ERROR':
+      return { ...state, detailsLoading: false, error: action.payload };
+    case 'CLOSE_DETAILS':
+      return { ...state, selectedBilling: null };
+    case 'SUBMITTING':
+      return { ...state, submitting: true, error: '', success: '' };
+    case 'SUBMIT_SUCCESS':
+      return { ...state, submitting: false, success: action.payload, selectedBilling: null };
+    case 'SUBMIT_ERROR':
+      return { ...state, submitting: false, error: action.payload };
+    case 'CLEAR_SUCCESS':
+      return { ...state, success: '' };
+    case 'DECREMENT_PAGE':
+      return { ...state, page: Math.max(state.page - 1, 1) };
+    default:
+      return state;
+  }
 }
 
+// ─── Sub-components (stable props → rarely re-render) ───────────────────────
+const Spinner = memo(function Spinner({ size = 20, style }) {
+  return (
+    <>
+      <style>{SPINNER_STYLE}</style>
+      <span
+        aria-label="Loading"
+        role="status"
+        style={{
+          display: 'inline-block',
+          width: size,
+          height: size,
+          border: '2px solid var(--line, #e0e0e0)',
+          borderTopColor: 'var(--color-primary, #29d22c)',
+          borderRadius: '50%',
+          animation: 'billing-spin 0.7s linear infinite',
+          flexShrink: 0,
+          ...style,
+        }}
+      />
+    </>
+  );
+});
+
 const BillingStatusBadge = memo(function BillingStatusBadge({ billing }) {
-  if (billing?.deleted_at) {
-    return <span className="status-badge danger">trashed</span>;
-  }
-  if (billing?.is_draft) {
-    return <span className="status-badge warning">draft</span>;
-  }
+  if (billing?.deleted_at) return <span className="status-badge danger">trashed</span>;
+  if (billing?.is_draft) return <span className="status-badge warning">draft</span>;
   return <span className={`status-badge ${billing.status}`}>{billing.status}</span>;
 });
 
+// Memoised row: only re-renders when its own billing data or submitting flag changes
 const BillingRow = memo(function BillingRow({
   billing,
   currencyCode,
@@ -88,95 +146,63 @@ const BillingRow = memo(function BillingRow({
   const canRestore = isDeleted;
 
   return (
-    <tr key={billing.billing_id} className={isDeleted ? 'row-soft-deleted' : ''}>
+    <tr className={isDeleted ? 'row-soft-deleted' : ''}>
       <td>{getBillingDisplayRef(billing)}</td>
       <td>{billing.customer?.full_name || 'Walk-in customer'}</td>
       <td>{currency(Number(billing.total || 0), currencyCode)}</td>
       <td>{currency(Number(billing.paid_amount || 0), currencyCode)}</td>
       <td>{currency(Number(billing.balance_due || 0), currencyCode)}</td>
-      <td>
-        <BillingStatusBadge billing={billing} />
-      </td>
+      <td><BillingStatusBadge billing={billing} /></td>
       <td>{billing.billing_date ? formatDateTime(billing.billing_date) : '-'}</td>
       <td>{billing.deleted_at ? formatDateTime(billing.deleted_at) : '-'}</td>
       <td>
         <div className="row-actions compact">
-          {!isDeleted ? (
-            <button
-              className="ghost-button"
-              onClick={() => onOpenDetails(billing.billing_id)}
-              disabled={submitting}
-            >
+          {!isDeleted && (
+            <button className="ghost-button" onClick={() => onOpenDetails(billing.billing_id)} disabled={submitting}>
               View
             </button>
-          ) : null}
-
-          {canRestore ? (
-            <button
-              className="ghost-button"
-              onClick={() => onRestore(billing.billing_id)}
-              disabled={submitting}
-            >
+          )}
+          {canRestore && (
+            <button className="ghost-button" onClick={() => onRestore(billing.billing_id)} disabled={submitting}>
               Restore
             </button>
-          ) : null}
-
-          {canDelete ? (
-            <button
-              className="ghost-button danger-button"
-              onClick={() => onDelete(billing)}
-              disabled={submitting}
-            >
+          )}
+          {canDelete && (
+            <button className="ghost-button danger-button" onClick={() => onDelete(billing)} disabled={submitting}>
               Trash
             </button>
-          ) : null}
+          )}
         </div>
       </td>
     </tr>
   );
 });
 
+// ─── Main page ───────────────────────────────────────────────────────────────
 export default function AdminBillingsPage() {
   const { can } = useAuth();
   const { stores, storeId } = useStore();
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
 
+  const {
+    billings, meta, page, perPage, effectivePerPage,
+    loading, status, scope,
+    selectedBilling, detailsLoading,
+    error, success, submitting,
+  } = state;
+
+  // Stable derived values
   const currentStore = useMemo(
-    () => stores.find((store) => String(store.store_id) === String(storeId)),
+    () => stores.find((s) => String(s.store_id) === String(storeId)),
     [stores, storeId]
   );
-
-  const printSettings = useMemo(
-    () => mergeStoreSettings(currentStore),
-    [currentStore]
-  );
-
-  const [billings, setBillings] = useState([]);
-  const [meta, setMeta] = useState({ ...EMPTY_META });
-  const [page, setPage] = useState(1);
-  const [perPage, setPerPage] = useState(DEFAULT_PER_PAGE);
-
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const [status, setStatus] = useState('');
-  const [scope, setScope] = useState('active');
-  const [search, setSearch] = useState('');
-  const debouncedSearch = useDebouncedValue(search.trim(), 250);
-
-  const [selectedBilling, setSelectedBilling] = useState(null);
-  const [detailsLoading, setDetailsLoading] = useState(false);
-
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-
-  const requestRef = useRef(0);
+  const printSettings = useMemo(() => mergeStoreSettings(currentStore), [currentStore]);
+  const currencyCode = currentStore?.currency;
 
   const canManageBillings = useMemo(
-    () =>
-      typeof can === 'function'
-        ? can('billings.manage') || can('billing.manage') || can('billings.view')
-        : true,
+    () => (typeof can === 'function'
+      ? can('billings.manage') || can('billing.manage') || can('billings.view')
+      : true),
     [can]
   );
 
@@ -185,265 +211,239 @@ export default function AdminBillingsPage() {
     [selectedBilling]
   );
 
-  const billingParams = useMemo(() => {
-    const params = {
-      page,
-      store_id: storeId,
-      per_page: perPage,
-    };
-
-    if (debouncedSearch) params.search = debouncedSearch;
-    if (status && status !== 'draft') params.status = status;
-    if (status === 'draft') params.is_draft = true;
-    if (scope === 'trashed') params.only_trashed = true;
-    else if (scope === 'all') params.with_trashed = true;
-
-    return params;
-  }, [page, perPage, storeId, debouncedSearch, status, scope]);
-
-  const loadBillings = useCallback(
-    async ({ keepRows = true } = {}) => {
-      if (!storeId) {
-        setBillings([]);
-        setMeta({ ...EMPTY_META });
-        setLoading(false);
-        setRefreshing(false);
-        return;
-      }
-
-      const requestId = ++requestRef.current;
-      const hasExistingRows = keepRows && billings.length > 0;
-
-      setError('');
-
-      if (hasExistingRows) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-
-      try {
-        const response = await billingService.list(billingParams);
-
-        if (requestId !== requestRef.current) return;
-
-        const parsed = extractPaginated(response, perPage);
-        setMeta(parsed.meta || { ...EMPTY_META });
-        setBillings(parsed.data || []);
-      } catch (err) {
-        if (requestId !== requestRef.current) return;
-        setError(err?.response?.data?.message || 'Unable to load billing records.');
-        if (!hasExistingRows) {
-          setBillings([]);
-          setMeta({ ...EMPTY_META });
-        }
-      } finally {
-        if (requestId === requestRef.current) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [storeId, billings.length, billingParams, perPage]
-  );
-
-  useEffect(() => {
-    setBillings([]);
-    setMeta({ ...EMPTY_META });
-    setPage(1);
-    setPerPage(DEFAULT_PER_PAGE);
-    setSearch('');
-    setStatus('');
-    setScope('active');
-    setSelectedBilling(null);
-    setError('');
-    setSuccess('');
-    setLoading(false);
-    setRefreshing(false);
-  }, [storeId]);
-
-  useEffect(() => {
-    setSelectedBilling(null);
-    setError('');
-    setSuccess('');
-    loadBillings({ keepRows: true });
-  }, [loadBillings]);
-
-  useEffect(() => {
-    if (!success) return;
-    const timer = setTimeout(() => setSuccess(''), 4000);
-    return () => clearTimeout(timer);
-  }, [success]);
-
-  const openDetails = useCallback(async (billingId) => {
-    setError('');
-    setDetailsLoading(true);
-
-    try {
-      const response = await billingService.show(billingId);
-      setSelectedBilling(extractRecord(response));
-    } catch (err) {
-      setError(err?.response?.data?.message || 'Unable to load billing detail.');
-    } finally {
-      setDetailsLoading(false);
-    }
-  }, []);
-
-  const handleDelete = useCallback(
-    async (billing) => {
-      const confirmed = window.confirm('Move this billing to trash?');
-      if (!confirmed) return;
-
-      setSubmitting(true);
-      setError('');
-      setSuccess('');
-
-      try {
-        if (typeof billingService.destroy === 'function') {
-          await billingService.destroy(billing.billing_id);
-        } else if (typeof billingService.delete === 'function') {
-          await billingService.delete(billing.billing_id);
-        } else {
-          throw new Error('Delete method not verified.');
-        }
-
-        if (String(selectedBilling?.billing_id) === String(billing.billing_id)) {
-          setSelectedBilling(null);
-        }
-
-        setSuccess('Billing moved to trash successfully.');
-
-        if (billings.length === 1 && page > 1) {
-          setPage((prev) => prev - 1);
-        } else {
-          loadBillings({ keepRows: true });
-        }
-      } catch (err) {
-        setError(err?.response?.data?.message || err?.message || 'Unable to delete billing.');
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [selectedBilling, billings.length, page, loadBillings]
-  );
-
-  const handleRestore = useCallback(
-    async (billingId) => {
-      const confirmed = window.confirm('Restore this billing from trash?');
-      if (!confirmed) return;
-
-      setSubmitting(true);
-      setError('');
-      setSuccess('');
-
-      try {
-        if (typeof billingService.restore !== 'function') {
-          throw new Error('Restore method not found.');
-        }
-
-        await billingService.restore(billingId);
-
-        if (String(selectedBilling?.billing_id) === String(billingId)) {
-          setSelectedBilling(null);
-        }
-
-        setSuccess('Billing restored successfully.');
-
-        if (billings.length === 1 && page > 1) {
-          setPage((prev) => prev - 1);
-        } else {
-          loadBillings({ keepRows: true });
-        }
-      } catch (err) {
-        setError(err?.response?.data?.message || err?.message || 'Unable to restore billing.');
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [selectedBilling, billings.length, page, loadBillings]
-  );
-
-  const handleSearchChange = useCallback((e) => {
-    setSearch(e.target.value);
-    setPage(1);
-  }, []);
-
-  const clearSearch = useCallback(() => {
-    setSearch('');
-    setPage(1);
-  }, []);
-
-  const handleStatusChange = useCallback((e) => {
-    setStatus(e.target.value);
-    setPage(1);
-  }, []);
-
-  const handleScopeChange = useCallback((e) => {
-    setScope(e.target.value);
-    setPage(1);
-  }, []);
-
-  const handlePerPageChange = useCallback((e) => {
-    setPerPage(Number(e.target.value));
-    setPage(1);
-  }, []);
-
-  const closeDetails = useCallback(() => {
-    setSelectedBilling(null);
-  }, []);
-
   const selectedBillingRef = useMemo(
     () => getBillingDisplayRef(selectedBilling),
     [selectedBilling]
   );
 
+  // Build params object only when the values that affect the API actually change.
+  // per_page is included only once the user has explicitly chosen a value —
+  // otherwise it's omitted so the backend's own default applies. Note this
+  // depends on `perPage` (the user's choice), not `effectivePerPage` (the
+  // backend-learned display value), so syncing the dropdown after a response
+  // never causes a second, redundant fetch.
+  const billingParams = useMemo(() => {
+    const params = { page, store_id: storeId };
+    if (perPage != null) params.per_page = perPage;
+    if (status && status !== 'draft') params.status = status;
+    if (status === 'draft') params.is_draft = true;
+    if (scope === 'trashed') params.only_trashed = true;
+    else if (scope === 'all') params.with_trashed = true;
+    return params;
+  }, [page, perPage, storeId, status, scope]);
+
+  // Race-condition guard
+  const requestRef = useRef(0);
+
+  // ── Reset when store changes (single dispatch, single re-render) ──────────
+  useEffect(() => {
+    dispatch({ type: 'RESET_FOR_STORE' });
+  }, [storeId]);
+
+  // ── Load billings (sequential: wait for previous request to settle) ───────
+  const loadBillings = useCallback(async () => {
+    if (!storeId) return;
+
+    const requestId = ++requestRef.current;
+
+    // Only show the full-page spinner on the very first load (no data yet)
+    if (!billings.length) {
+      dispatch({ type: 'SET_LOADING', payload: true });
+    }
+
+    try {
+      const response = await billingService.list(billingParams);
+
+      // Discard stale responses from superseded requests
+      if (requestId !== requestRef.current) return;
+
+      // extractPaginated's second arg is just a fallback for malformed
+      // responses, not the value that should govern requests, so pass
+      // perPage (which may be undefined) rather than a hardcoded constant.
+      const parsed = extractPaginated(response, perPage);
+      dispatch({
+        type: 'LOAD_SUCCESS',
+        billings: parsed.data || [],
+        meta: parsed.meta || { ...EMPTY_META },
+      });
+    } catch (err) {
+      if (requestId !== requestRef.current) return;
+      dispatch({
+        type: 'LOAD_ERROR',
+        payload: err?.response?.data?.message || 'Unable to load billing records.',
+      });
+    }
+  }, [storeId, billingParams, perPage, billings.length]);
+
+  // Trigger load whenever params change
+  useEffect(() => {
+    loadBillings();
+  }, [loadBillings]);
+
+  // ── Auto-clear success banner ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!success) return;
+    const t = setTimeout(() => dispatch({ type: 'CLEAR_SUCCESS' }), 4000);
+    return () => clearTimeout(t);
+  }, [success]);
+
+  // ── Open billing detail: await fetch, then show modal ────────────────────
+  const openDetails = useCallback(async (billingId) => {
+    dispatch({ type: 'OPEN_DETAILS_START' });
+
+    try {
+      const response = await billingService.show(billingId);
+      // Await fully resolved before updating state
+      dispatch({ type: 'OPEN_DETAILS_SUCCESS', payload: extractRecord(response) });
+    } catch (err) {
+      dispatch({
+        type: 'OPEN_DETAILS_ERROR',
+        payload: err?.response?.data?.message || 'Unable to load billing detail.',
+      });
+    }
+  }, []);
+
+  // ── Delete: await destroy, then await reload ──────────────────────────────
+  const handleDelete = useCallback(async (billing) => {
+    if (!window.confirm('Move this billing to trash?')) return;
+
+    dispatch({ type: 'SUBMITTING' });
+
+    try {
+      const destroyFn = billingService.destroy ?? billingService.delete;
+      if (typeof destroyFn !== 'function') throw new Error('Delete method not available.');
+
+      // 1. Wait for delete to complete
+      await destroyFn(billing.billing_id);
+
+      dispatch({ type: 'SUBMIT_SUCCESS', payload: 'Billing moved to trash successfully.' });
+
+      // 2. Then reload — go back a page if we just emptied it
+      if (billings.length === 1 && page > 1) {
+        dispatch({ type: 'DECREMENT_PAGE' });
+      } else {
+        // 3. Await reload before releasing control
+        await loadBillings();
+      }
+    } catch (err) {
+      dispatch({
+        type: 'SUBMIT_ERROR',
+        payload: err?.response?.data?.message || err?.message || 'Unable to delete billing.',
+      });
+    }
+  }, [billings.length, page, loadBillings]);
+
+  // ── Restore: await restore, then await reload ─────────────────────────────
+  const handleRestore = useCallback(async (billingId) => {
+    if (!window.confirm('Restore this billing from trash?')) return;
+    if (typeof billingService.restore !== 'function') {
+      dispatch({ type: 'SUBMIT_ERROR', payload: 'Restore method not found.' });
+      return;
+    }
+
+    dispatch({ type: 'SUBMITTING' });
+
+    try {
+      // 1. Wait for restore to complete
+      await billingService.restore(billingId);
+
+      dispatch({ type: 'SUBMIT_SUCCESS', payload: 'Billing restored successfully.' });
+
+      // 2. Then reload
+      if (billings.length === 1 && page > 1) {
+        dispatch({ type: 'DECREMENT_PAGE' });
+      } else {
+        // 3. Await reload before releasing control
+        await loadBillings();
+      }
+    } catch (err) {
+      dispatch({
+        type: 'SUBMIT_ERROR',
+        payload: err?.response?.data?.message || err?.message || 'Unable to restore billing.',
+      });
+    }
+  }, [billings.length, page, loadBillings]);
+
+  // ── Stable event handlers (no inline lambdas in JSX) ─────────────────────
+  const handleStatusChange = useCallback(
+    (e) => dispatch({ type: 'SET_STATUS', payload: e.target.value }),
+    []
+  );
+  const handleScopeChange = useCallback(
+    (e) => dispatch({ type: 'SET_SCOPE', payload: e.target.value }),
+    []
+  );
+  const handlePerPageChange = useCallback(
+    (e) => dispatch({ type: 'SET_PER_PAGE', payload: Number(e.target.value) }),
+    []
+  );
+  const handlePrevPage = useCallback(
+    () => dispatch({ type: 'SET_PAGE', payload: Math.max(page - 1, 1) }),
+    [page]
+  );
+  const handleNextPage = useCallback(
+    () => dispatch({ type: 'SET_PAGE', payload: Math.min(page + 1, meta.last_page || 1) }),
+    [page, meta.last_page]
+  );
+  const closeDetails = useCallback(() => dispatch({ type: 'CLOSE_DETAILS' }), []);
+
+  // Print/download handlers — stable, no state deps
+  const handlePrintInvoice = useCallback(
+    () => openBillingPrint(selectedBilling, currentStore, 'invoice', printSettings),
+    [selectedBilling, currentStore, printSettings]
+  );
+  const handleDownloadInvoice = useCallback(
+    () => downloadBillingDocument(selectedBilling, 'invoice'),
+    [selectedBilling]
+  );
+  const handlePrintReceipt = useCallback(
+    () => openBillingPrint(selectedBilling, currentStore, 'receipt', printSettings),
+    [selectedBilling, currentStore, printSettings]
+  );
+  const handleDownloadReceipt = useCallback(
+    () => downloadBillingDocument(selectedBilling, 'receipt'),
+    [selectedBilling]
+  );
+  const handleDeleteSelected = useCallback(
+    () => handleDelete(selectedBilling),
+    [handleDelete, selectedBilling]
+  );
+  const handleRestoreSelected = useCallback(
+    () => handleRestore(selectedBilling?.billing_id),
+    [handleRestore, selectedBilling]
+  );
+
+  const isPaid = selectedBilling?.status === 'paid';
+  const hasPayments = !!selectedBilling?.payments?.length;
+
+  // Whatever is currently in effect (user choice, or backend-learned default
+  // once known), for the dropdown's value.
+  const displayedPerPage = effectivePerPage ?? meta.per_page ?? '';
+
+  // Ensure the dropdown always has an option matching the current value,
+  // even if it isn't one of the hardcoded common choices.
+  const pageSizeOptions = useMemo(() => {
+    const opts = new Set(PAGE_SIZE_OPTIONS);
+    if (displayedPerPage !== '') opts.add(Number(displayedPerPage));
+    return Array.from(opts).sort((a, b) => a - b);
+  }, [displayedPerPage]);
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <section className="stack-lg">
+      {/* Header */}
       <div className="section-header" style={{ justifyContent: 'space-between', gap: 16 }}>
         <div>
           <h3>Billings</h3>
-          <p>
-            Accounting and finance view for managers. Track legal billing references, totals,
-            payments, balances, and tax-related records.
-          </p>
+          <p>Accounting and finance view for managers. Track legal billing references, totals, payments, balances, and tax-related records.</p>
         </div>
+      </div>
 
-        <div className="row-actions compact" style={{ flexWrap: 'wrap' }}>
-          <div style={{ position: 'relative', display: 'inline-block' }}>
-            <input
-              type="text"
-              className="text-input slim search-filter-input"
-              style={{ paddingRight: search ? '24px' : '8px', minWidth: '220px' }}
-              placeholder="Search reference or customer..."
-              value={search}
-              onChange={handleSearchChange}
-              disabled={!storeId}
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={clearSearch}
-                style={{
-                  position: 'absolute',
-                  right: '8px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: '#29d22c',
-                  padding: 0,
-                  fontSize: '14px',
-                }}
-                title="Clear filter"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-
+      {/* Filters toolbar */}
+      <div className="users-toolbar-row">
+        <div className="users-toolbar-controls">
           <select
-            className="select-input slim"
+            className="select-input users-filter-select"
             value={status}
             onChange={handleStatusChange}
             disabled={!storeId}
@@ -456,7 +456,7 @@ export default function AdminBillingsPage() {
           </select>
 
           <select
-            className="select-input slim"
+            className="select-input users-filter-select"
             value={scope}
             onChange={handleScopeChange}
             disabled={!storeId}
@@ -466,135 +466,82 @@ export default function AdminBillingsPage() {
             <option value="all">All records</option>
           </select>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="muted">Show</span>
-            <select
-              className="select-input slim"
-              value={perPage}
-              onChange={handlePerPageChange}
-              disabled={!storeId}
-            >
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
+          <div className="users-toolbar-divider" />
+
+          <div className="users-perpage-wrap">
+            <select value={displayedPerPage} onChange={handlePerPageChange} disabled={!storeId}>
+              {pageSizeOptions.map((size) => (
+                <option key={size} value={size}>{size}</option>
               ))}
             </select>
-          </label>
+            <ChevronDown size={14} />
+          </div>
+
+          <div className="users-toolbar-divider" />
 
           <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
         </div>
       </div>
 
+      {/* Table card */}
       <article className="card">
-        <div className="card-header">
-          <div>
-            <h3>Billing records</h3>
-            <p>
-              {meta.from && meta.to
-                ? `Showing ${meta.from}-${meta.to} of ${meta.total}`
-                : `${billings.length} items`}
-              {refreshing && billings.length ? ' • refreshing...' : ''}
-            </p>
-          </div>
-        </div>
-
         {error ? <p className="form-error">{error}</p> : null}
         {success ? <p className="form-success">{success}</p> : null}
-
-        <div className="table-wrap" style={{ position: 'relative' }}>
-          {refreshing && billings.length ? (
-            <div
-              style={{
-                position: 'absolute',
-                top: 8,
-                right: 8,
-                zIndex: 1,
-                fontSize: 12,
-                color: 'var(--color-text-secondary)',
-                background: 'var(--panel)',
-                padding: '4px 8px',
-                borderRadius: 999,
-                border: '1px solid var(--line)',
-              }}
-            >
-              Refreshing…
+        <div className="table-wrap">
+          {loading && !billings.length ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px 0' }}>
+              <Spinner size={32} />
             </div>
-          ) : null}
-
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Billing Ref</th>
-                <th>Customer</th>
-                <th>Total</th>
-                <th>Paid</th>
-                <th>Balance</th>
-                <th>Status</th>
-                <th>Date</th>
-                <th>Deleted</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {!storeId ? (
+          ) : (
+            <table className="data-table">
+              <thead>
                 <tr>
-                  <td colSpan="9">Select a store first.</td>
+                  <th>Billing Ref</th>
+                  <th>Customer</th>
+                  <th>Total</th>
+                  <th>Paid</th>
+                  <th>Balance</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                  <th>Deleted</th>
+                  <th>Actions</th>
                 </tr>
-              ) : loading && !billings.length ? (
-                <tr>
-                  <td colSpan="9">Loading...</td>
-                </tr>
-              ) : billings.length ? (
-                billings.map((billing) => (
-                  <BillingRow
-                    key={billing.billing_id}
-                    billing={billing}
-                    currencyCode={currentStore?.currency}
-                    submitting={submitting}
-                    onOpenDetails={openDetails}
-                    onRestore={handleRestore}
-                    onDelete={handleDelete}
-                  />
-                ))
-              ) : (
-                <tr>
-                  <td colSpan="9">No billings found.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {!storeId ? (
+                  <tr><td colSpan="9">Select a store first.</td></tr>
+                ) : billings.length ? (
+                  billings.map((billing) => (
+                    <BillingRow
+                      key={billing.billing_id}
+                      billing={billing}
+                      currencyCode={currencyCode}
+                      submitting={submitting}
+                      onOpenDetails={openDetails}
+                      onRestore={handleRestore}
+                      onDelete={handleDelete}
+                    />
+                  ))
+                ) : (
+                  <tr><td colSpan="9">No billings found.</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
         </div>
 
         {storeId ? (
-          <div
-            className="row-actions"
-            style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}
-          >
+          <div className="row-actions" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
             <span className="muted">
               {meta.from && meta.to
                 ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
                 : `${billings.length} items`}
-              {refreshing && billings.length ? ' • refreshing...' : ''}
             </span>
-
             <div className="row-actions compact">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setPage((p) => Math.max(p - 1, 1))}
-                disabled={loading || refreshing || !meta.has_prev_page}
-              >
+              <button type="button" className="ghost-button" onClick={handlePrevPage} disabled={loading || !meta.has_prev_page}>
                 Previous
               </button>
-
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setPage((p) => Math.min(p + 1, meta.last_page || 1))}
-                disabled={loading || refreshing || !meta.has_next_page}
-              >
+              <button type="button" className="ghost-button" onClick={handleNextPage} disabled={loading || !meta.has_next_page}>
                 Next
               </button>
             </div>
@@ -602,6 +549,7 @@ export default function AdminBillingsPage() {
         ) : null}
       </article>
 
+      {/* Detail modal */}
       <Modal
         open={!!selectedBilling || detailsLoading}
         title="Billing details"
@@ -609,68 +557,46 @@ export default function AdminBillingsPage() {
         width="920px"
       >
         {detailsLoading && !selectedBilling ? (
-          <div className="stack-md">
-            <p className="muted">Loading billing details...</p>
+          <div className="stack-md" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px 0' }}>
+            <Spinner size={36} />
           </div>
         ) : selectedBilling ? (
           <div className="stack-md">
+            {/* Meta grid */}
             <div className="detail-grid">
               <div>
                 <p className="muted">Billing ref</p>
                 <strong>{selectedBillingRef}</strong>
               </div>
-
               <div>
                 <p className="muted">Customer</p>
                 <strong>{selectedBilling.customer?.full_name || 'Walk-in customer'}</strong>
               </div>
-
               <div>
                 <p className="muted">Status</p>
                 <strong>
-                  {selectedBilling.deleted_at
-                    ? 'trashed'
-                    : selectedBilling.is_draft
-                      ? 'draft'
-                      : selectedBilling.status}
+                  {selectedBilling.deleted_at ? 'trashed' : selectedBilling.is_draft ? 'draft' : selectedBilling.status}
                 </strong>
               </div>
-
               <div>
                 <p className="muted">Billing date</p>
-                <strong>
-                  {selectedBilling.billing_date
-                    ? formatDateTime(selectedBilling.billing_date)
-                    : '-'}
-                </strong>
+                <strong>{selectedBilling.billing_date ? formatDateTime(selectedBilling.billing_date) : '-'}</strong>
               </div>
-
               <div>
                 <p className="muted">Paid amount</p>
-                <strong>
-                  {currency(Number(selectedBilling.paid_amount || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.paid_amount || 0), currencyCode)}</strong>
               </div>
-
               <div>
                 <p className="muted">Balance due</p>
-                <strong>
-                  {currency(Number(selectedBilling.balance_due || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.balance_due || 0), currencyCode)}</strong>
               </div>
-
               <div>
                 <p className="muted">Latest receipt</p>
                 <strong>{latestSelectedPayment?.receiptnumber || '-'}</strong>
               </div>
-
               <div>
                 <p className="muted">Stock applied</p>
-                <strong>
-                  {selectedBilling.stock_applied_at
-                    ? formatDateTime(selectedBilling.stock_applied_at)
-                    : '-'}
-                </strong>
+                <strong>{selectedBilling.stock_applied_at ? formatDateTime(selectedBilling.stock_applied_at) : '-'}</strong>
               </div>
             </div>
 
@@ -681,6 +607,7 @@ export default function AdminBillingsPage() {
               </div>
             ) : null}
 
+            {/* Items table */}
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
@@ -697,56 +624,46 @@ export default function AdminBillingsPage() {
                       <tr key={item.billing_item_id}>
                         <td>{item.product?.product_name}</td>
                         <td>{item.quantity}</td>
-                        <td>{currency(Number(item.unit_price || 0), currentStore?.currency)}</td>
+                        <td>{currency(Number(item.unit_price || 0), currencyCode)}</td>
                         <td>
                           {currency(
                             Number(
-                              item.total_amount ??
-                                item.line_total ??
-                                item.line_subtotal ??
-                                Number(item.quantity || 0) * Number(item.unit_price || 0)
+                              item.total_amount ?? item.line_total ?? item.line_subtotal ??
+                              (Number(item.quantity || 0) * Number(item.unit_price || 0))
                             ),
-                            currentStore?.currency
+                            currencyCode
                           )}
                         </td>
                       </tr>
                     ))
                   ) : (
-                    <tr>
-                      <td colSpan="4">No items found for this billing.</td>
-                    </tr>
+                    <tr><td colSpan="4">No items found for this billing.</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
 
+            {/* Summary */}
             <div className="billing-summary-grid">
               <div className="summary-box">
                 <span>Subtotal</span>
-                <strong>
-                  {currency(Number(selectedBilling.subtotal || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.subtotal || 0), currencyCode)}</strong>
               </div>
               <div className="summary-box">
                 <span>VAT</span>
-                <strong>
-                  {currency(Number(selectedBilling.vat_amount || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.vat_amount || 0), currencyCode)}</strong>
               </div>
               <div className="summary-box">
                 <span>Paid</span>
-                <strong>
-                  {currency(Number(selectedBilling.paid_amount || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.paid_amount || 0), currencyCode)}</strong>
               </div>
               <div className="summary-box">
                 <span>Balance</span>
-                <strong>
-                  {currency(Number(selectedBilling.balance_due || 0), currentStore?.currency)}
-                </strong>
+                <strong>{currency(Number(selectedBilling.balance_due || 0), currencyCode)}</strong>
               </div>
             </div>
 
+            {/* Payments table */}
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
@@ -760,87 +677,78 @@ export default function AdminBillingsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedBilling.payments?.length ? (
+                  {hasPayments ? (
                     selectedBilling.payments.map((payment) => (
                       <tr key={payment.payment_id}>
                         <td>{payment.receiptnumber || '-'}</td>
                         <td>{payment.payment_method || '-'}</td>
-                        <td>
-                          {currency(Number(payment.amount_received || 0), currentStore?.currency)}
-                        </td>
-                        <td>
-                          {currency(Number(payment.amount_tendered || 0), currentStore?.currency)}
-                        </td>
-                        <td>
-                          {currency(Number(payment.change_returned || 0), currentStore?.currency)}
-                        </td>
-                        <td>
-                          {payment.payment_date ? formatDateTime(payment.payment_date) : '-'}
-                        </td>
+                        <td>{currency(Number(payment.amount_received || 0), currencyCode)}</td>
+                        <td>{currency(Number(payment.amount_tendered || 0), currencyCode)}</td>
+                        <td>{currency(Number(payment.change_returned || 0), currencyCode)}</td>
+                        <td>{payment.payment_date ? formatDateTime(payment.payment_date) : '-'}</td>
                       </tr>
                     ))
                   ) : (
-                    <tr>
-                      <td colSpan="6">No payments recorded for this billing.</td>
-                    </tr>
+                    <tr><td colSpan="6">No payments recorded for this billing.</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
 
+            {/* Actions:
+                - paid status → receipt buttons (not invoice)
+                - unpaid/partial/draft → invoice buttons
+                - trashed → restore only
+            */}
             <div className="row-actions">
               {!selectedBilling.deleted_at ? (
                 <>
-                  <button
-                    className="primary-button"
-                    onClick={() =>
-                      openBillingPrint(selectedBilling, currentStore, 'invoice', printSettings)
-                    }
-                  >
-                    Print invoice
-                  </button>
-
-                  <button
-                    className="ghost-button"
-                    onClick={() => downloadBillingDocument(selectedBilling, 'invoice')}
-                  >
-                    Download invoice
-                  </button>
-
-                  {selectedBilling.payments?.length ? (
+                  {isPaid ? (
+                    /* Paid: show receipt */
                     <>
-                      <button
-                        className="ghost-button"
-                        onClick={() =>
-                          openBillingPrint(selectedBilling, currentStore, 'receipt', printSettings)
-                        }
-                      >
+                      <button className="primary-button" onClick={handlePrintReceipt}>
                         Print receipt
                       </button>
-
-                      <button
-                        className="ghost-button"
-                        onClick={() => downloadBillingDocument(selectedBilling, 'receipt')}
-                      >
+                      <button className="ghost-button" onClick={handleDownloadReceipt}>
                         Download receipt
                       </button>
                     </>
-                  ) : null}
+                  ) : (
+                    /* Unpaid / partial / draft: show invoice + receipt if payments exist */
+                    <>
+                      <button className="primary-button" onClick={handlePrintInvoice}>
+                        Print invoice
+                      </button>
+                      <button className="ghost-button" onClick={handleDownloadInvoice}>
+                        Download invoice
+                      </button>
+                      {hasPayments && (
+                        <>
+                          <button className="ghost-button" onClick={handlePrintReceipt}>
+                            Print receipt
+                          </button>
+                          <button className="ghost-button" onClick={handleDownloadReceipt}>
+                            Download receipt
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
 
-                  {selectedBilling.is_draft ? (
+                  {selectedBilling.is_draft && (
                     <button
                       className="ghost-button danger-button"
-                      onClick={() => handleDelete(selectedBilling)}
+                      onClick={handleDeleteSelected}
                       disabled={submitting || !canManageBillings}
                     >
                       Move to trash
                     </button>
-                  ) : null}
+                  )}
                 </>
               ) : (
                 <button
                   className="primary-button"
-                  onClick={() => handleRestore(selectedBilling.billing_id)}
+                  onClick={handleRestoreSelected}
                   disabled={submitting || !canManageBillings}
                 >
                   Restore billing

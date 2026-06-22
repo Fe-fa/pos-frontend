@@ -1,6 +1,17 @@
+import { memo } from 'react';
 import { Plus, Search } from 'lucide-react';
+import Spinner from './Spinner';
 
-export default function InventoryHeaderToolbar({
+/**
+ * Page-level toolbar for the inventory section.
+ *
+ * pageSize starts as `null` on the first load (before the backend default
+ * is known). The selector shows "Loading…" and is disabled in that state.
+ * Once the first response arrives and pageSize is set from meta.per_page,
+ * the selector becomes active and the options list is built dynamically —
+ * always including the backend default so the selector is never desynced.
+ */
+const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
   total,
   lowStockCount,
   isRefreshing,
@@ -13,6 +24,13 @@ export default function InventoryHeaderToolbar({
   onPageSizeChange,
   pageSizeOptions,
 }) {
+  // Merge the backend default into the preset list so it always appears,
+  // deduped and sorted ascending.
+  const resolvedOptions =
+    pageSize !== null
+      ? [...new Set([...pageSizeOptions, pageSize])].sort((a, b) => a - b)
+      : pageSizeOptions;
+
   return (
     <>
       <div
@@ -26,10 +44,16 @@ export default function InventoryHeaderToolbar({
       >
         <div className="catalog-hero-copy" style={{ display: 'flex', flexDirection: 'column' }}>
           <h2 className="catalog-title">Inventory</h2>
-          <p className="catalog-subtitle">
+          <p className="catalog-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             {total || 0} stock lines
             {lowStockCount ? ` • ${lowStockCount} low stock on this page` : ''}
-            {isRefreshing ? ' • refreshing...' : ''}
+            {isRefreshing && (
+              <>
+                {' '}•{' '}
+                <Spinner size={12} style={{ color: 'var(--color-text-secondary)' }} />
+                {' '}refreshing…
+              </>
+            )}
           </p>
         </div>
 
@@ -37,7 +61,7 @@ export default function InventoryHeaderToolbar({
           type="button"
           className="ghost-button"
           onClick={onAddClick}
-          style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}
           disabled={!storeId || !canManage}
         >
           <Plus size={16} />
@@ -62,12 +86,21 @@ export default function InventoryHeaderToolbar({
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="muted">Show</span>
-          <select className="select-input" value={pageSize} onChange={onPageSizeChange} disabled={!storeId}>
-            {pageSizeOptions.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
+          <select
+            className="select-input"
+            value={pageSize ?? ''}
+            onChange={onPageSizeChange}
+            disabled={!storeId || pageSize === null}
+          >
+            {pageSize === null ? (
+              <option value="">Loading…</option>
+            ) : (
+              resolvedOptions.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))
+            )}
           </select>
         </label>
 
@@ -75,4 +108,6 @@ export default function InventoryHeaderToolbar({
       </div>
     </>
   );
-}
+});
+
+export default InventoryHeaderToolbar;

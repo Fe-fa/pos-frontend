@@ -11,7 +11,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import './styles/app.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
+  
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <ThemeProvider>
@@ -23,5 +23,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         </ThemeProvider>
       </BrowserRouter>
     </QueryClientProvider>
-  </React.StrictMode>
+    // <React.StrictMode>
+  // </React.StrictMode>
 );

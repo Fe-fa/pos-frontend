@@ -16,9 +16,9 @@ export default function ProtectedRoute({
   const { user, loading, isAuthenticated, can } = useAuth();
   const location = useLocation();
 
-  if (loading) {
-    return <div className="page-loader">Loading workspace...</div>;
-  }
+  // if (loading) {
+  //   return <div className="page-loader">Loading workspace...</div>;
+  // }
 
   // Not authenticated → always go to login, never home
   if (!isAuthenticated) {

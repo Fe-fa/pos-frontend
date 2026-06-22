@@ -1,4 +1,5 @@
 import { X } from 'lucide-react';
+import Spinner from './Spinner';
 
 export default function InventoryFormModal({
   editingId,
@@ -25,7 +26,12 @@ export default function InventoryFormModal({
             </p>
           </div>
 
-          <button type="button" className="icon-button" onClick={() => onClose(saving)} disabled={saving}>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => onClose(saving)}
+            disabled={saving}
+          >
             <X size={18} />
           </button>
         </div>
@@ -41,7 +47,9 @@ export default function InventoryFormModal({
                 required
                 disabled={Boolean(editingId) || productsLoading}
               >
-                <option value="">{productsLoading ? 'Loading products...' : 'Select product'}</option>
+                <option value="">
+                  {productsLoading ? 'Loading products…' : 'Select product'}
+                </option>
                 {products.map((product) => (
                   <option key={product.product_id} value={product.product_id}>
                     {product.product_name} ({product.sku})
@@ -88,12 +96,31 @@ export default function InventoryFormModal({
             {modalError ? <p className="form-error span-2">{modalError}</p> : null}
 
             <div className="catalog-modal-actions span-2">
-              <button type="button" className="ghost-button" onClick={() => onClose(saving)} disabled={saving}>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => onClose(saving)}
+                disabled={saving}
+              >
                 Cancel
               </button>
 
-              <button className="catalog-primary-btn" type="submit" disabled={saving || !canManage}>
-                {saving ? 'Saving...' : editingId ? 'Update inventory' : 'Receive stock'}
+              <button
+                className="catalog-primary-btn"
+                type="submit"
+                disabled={saving || !canManage}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+              >
+                {saving ? (
+                  <>
+                    <Spinner size={14} />
+                    Saving…
+                  </>
+                ) : editingId ? (
+                  'Update inventory'
+                ) : (
+                  'Receive stock'
+                )}
               </button>
             </div>
           </form>

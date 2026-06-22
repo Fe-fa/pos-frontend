@@ -8,7 +8,7 @@ export { useAuth } from '../hooks/useAuth';
 
 let inflightProfileFetch = null;
 
-const PERMISSION_REFRESH_INTERVAL = 5 * 60 * 1000; // refresh every 5 minutes
+const PERMISSION_REFRESH_INTERVAL = 5 * 60 * 1000;
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(readJSON(storageKeys.user, null));
@@ -34,7 +34,7 @@ export function AuthProvider({ children }) {
     return response.user;
   }, []);
 
-  // Bootstrap — verify token and load fresh permissions on mount
+  // Bootstrap — verify token on mount, clear session if invalid
   useEffect(() => {
     const token = localStorage.getItem(storageKeys.token);
     if (!token) { setLoading(false); return; }
@@ -43,34 +43,32 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, [clearSession, refreshProfile]);
 
-  // Periodic permission refresh — picks up backend changes every 5 minutes
+  // Periodic permission refresh — picks up role/permission changes every 5 min
   useEffect(() => {
     if (!user) return;
-
     const interval = setInterval(async () => {
       try {
         await refreshProfile();
-      } catch {
-        // Silent fail — expired tokens are handled by the API interceptor
+      } catch (err) {
+        if (err?.response?.status === 401) clearSession();
       }
     }, PERMISSION_REFRESH_INTERVAL);
-
     return () => clearInterval(interval);
-  }, [user, refreshProfile]);
+  }, [user, refreshProfile, clearSession]);
+
+  // Force logout signal from API interceptor (refresh token expired)
+  useEffect(() => {
+    const handler = () => clearSession();
+    window.addEventListener('auth:logout', handler);
+    return () => window.removeEventListener('auth:logout', handler);
+  }, [clearSession]);
 
   const login = async (payload) => {
     const response = await authService.login(payload);
     localStorage.setItem(storageKeys.token, response.access_token);
     writeJSON(storageKeys.user, response.user);
     setUser(response.user);
-
-    // Fetch fresh permissions so any recent role/permission changes take effect
-    try {
-      const freshUser = await refreshProfile();
-      return freshUser;
-    } catch {
-      return response.user;
-    }
+    return response.user;
   };
 
   const register = async (payload) => authService.register(payload);
@@ -83,7 +81,7 @@ export function AuthProvider({ children }) {
   const can = useCallback((permission) => {
     if (!user) return false;
     if (user.role === 'admin') return true;
-    if (permission === null) return false; // null = admin-only route
+    if (permission === null) return false;
     return Array.isArray(user.permissions) && user.permissions.includes(permission);
   }, [user]);
 
