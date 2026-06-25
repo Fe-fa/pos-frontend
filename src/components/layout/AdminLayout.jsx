@@ -1,70 +1,43 @@
-import {
-  Bell, Boxes, Coffee, LayoutDashboard, LogOut,
-  Moon, Package, ReceiptText, Settings,
-  ShoppingBasket, Store, Sun, Users, Warehouse,
-} from 'lucide-react';
-import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useMemo } from 'react';
-
-// Admin nav — all pages, no permission filter needed (admin has everything)
-const adminNavItems = [
-  { to: '/admin/dashboard',      label: 'Dashboard',      icon: LayoutDashboard, permission: 'page.dashboard'      },
-  { to: '/admin/stores',         label: 'Stores',         icon: Store,           permission: 'page.stores'         },
-  { to: '/admin/users',          label: 'Users & Access', icon: Users,           permission: 'page.users'          },
-  { to: '/admin/categories',     label: 'Categories',     icon: Boxes,           permission: 'page.categories'     },
-  { to: '/admin/customers',      label: 'Customers',      icon: Users,           permission: 'page.customers'      },
-  { to: '/admin/products',       label: 'Products',       icon: Package,         permission: 'page.products'       },
-  { to: '/admin/inventory',      label: 'Inventory',      icon: Warehouse,       permission: 'page.inventory'      },
-  { to: '/admin/billings',       label: 'Billings',       icon: ReceiptText,     permission: 'page.billings'       },
-  { to: '/admin/orders',         label: 'Orders',         icon: ShoppingBasket,  permission: 'page.orders'         },
-  { to: '/admin/settings',       label: 'Settings',       icon: Settings,        permission: 'page.settings'       },
-  { to: '/admin/access-control', label: 'Access Control', icon: Users,           permission: 'page.access_control' },
-];
-
-// Manager/cashier nav — page.* controls visibility, *.manage controls actions inside the page
-const managerNavItems = [
-  { to: '/admin/manager',    label: 'Dashboard',  icon: LayoutDashboard, permission: 'page.dashboard'  },
-  { to: '/admin/users',      label: 'Users',      icon: Users,           permission: 'page.users'      },
-  { to: '/admin/cashiers',   label: 'Cashiers',   icon: Users,           permission: 'page.cashiers'   },
-  { to: '/admin/customers',  label: 'Customers',  icon: Users,           permission: 'page.customers'  },
-  { to: '/admin/categories', label: 'Categories', icon: Boxes,           permission: 'page.categories' },
-  { to: '/admin/products',   label: 'Products',   icon: Package,         permission: 'page.products'   },
-  { to: '/admin/inventory',  label: 'Inventory',  icon: Warehouse,       permission: 'page.inventory'  },
-  { to: '/admin/billings',   label: 'Billings',   icon: ReceiptText,     permission: 'page.billings'   },
-  { to: '/admin/orders',     label: 'Orders',     icon: ShoppingBasket,  permission: 'page.orders'     },
-];
+import { Bell, Coffee, LogOut, Moon, Sun } from 'lucide-react';
+import DynamicSidebar from '../../components/layout/DynamicSidebar';
 
 export default function AdminLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { logout, user, can } = useAuth();
+  const { logout, user } = useAuth();
   const { stores, storeId, setStoreId } = useStore();
   const { theme, toggleTheme } = useTheme();
 
   const isAdmin = user?.role === 'admin';
-  const isDashboard = location.pathname === '/admin/dashboard';
+  const isDashboard =
+    location.pathname === '/admin/dashboard' || location.pathname === '/admin/manager';
 
-  // Both admin and manager/cashier now filter by page.* permissions.
-  // Admin has all page.* permissions from the seeder so nothing is hidden.
-  // Manager/cashier only see pages their role grants.
-  const navItems = (isAdmin ? adminNavItems : managerNavItems).filter(
-    (item) => !item.permission || can(item.permission)
+  const currentStore = useMemo(
+    () => stores.find((store) => String(store.store_id) === String(storeId)) || null,
+    [stores, storeId]
   );
-    const currentStore = useMemo(
-  () => stores.find((store) => String(store.store_id) === String(storeId)),
-  [stores, storeId]
-);
 
   const handleLogout = async () => {
     await logout();
     navigate('/login');
   };
 
+  const outletContext = useMemo(
+    () => ({
+      selectedStore: currentStore,
+      activeStore: currentStore,
+      selectedStoreId: storeId || null,
+      stores,
+    }),
+    [currentStore, storeId, stores]
+  );
 
-return (
+  return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
@@ -77,23 +50,16 @@ return (
           </div>
         </div>
 
-        <nav className="nav-list">
-          {navItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-            </NavLink>
-          ))}
+        <DynamicSidebar />
 
-          <button className="ghost-button" onClick={handleLogout}>
-            <LogOut size={16} />
-            Logout
-          </button>
-        </nav>
+        <button
+          className="ghost-button"
+          onClick={handleLogout}
+          style={{ margin: '12px 14px 0' }}
+        >
+          <LogOut size={16} />
+          Logout
+        </button>
       </aside>
 
       <section className="main-shell">
@@ -119,10 +85,11 @@ return (
               <div className="store-switcher-panel">
                 <select
                   className="select-input slim"
-                  value={storeId}
+                  value={storeId ?? ''}
                   onChange={(e) => setStoreId(e.target.value)}
                   disabled={!stores.length}
                 >
+                  {isAdmin ? <option value="">All Stores</option> : null}
                   {!stores.length ? <option value="">No store</option> : null}
                   {stores.map((store) => (
                     <option key={store.store_id} value={store.store_id}>
@@ -144,7 +111,10 @@ return (
         )}
 
         <main className="page-content">
-          <Outlet />
+          <Outlet
+            key={`store-scope-${storeId || 'all'}`}
+            context={outletContext}
+          />
         </main>
       </section>
     </div>

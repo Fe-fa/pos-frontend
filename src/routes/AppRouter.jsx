@@ -24,10 +24,16 @@ import AdminAccessControlPage from '../pages/admin/AdminAccessControlPage';
 import AdminCashiersPage from '../pages/admin/AdminCashiersPage';
 import ManagerDashboardPage from '../pages/admin/ManagerDashboardPage';
 import { ROUTE_PERMISSIONS } from '../config/routePermissions';
+import AdminPaymentsPage from '../pages/admin/AdminPaymentsPage';
+
 
 function RootRedirect() {
   const { user } = useAuth();
   return <Navigate to={getUserHomePath(user)} replace />;
+}
+function AdminIndexRedirect() {
+  const { user } = useAuth();
+  return <Navigate to={user?.role === 'admin' ? 'dashboard' : 'manager'} replace />;
 }
 
 function PermissionRoute({ path, element }) {
@@ -59,9 +65,10 @@ export default function AppRouter() {
 
       <Route element={<ProtectedRoute allowedRoles={['admin', 'manager']} />}>
         <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<Navigate to="dashboard" replace />} />
+          <Route index element={<AdminIndexRedirect />} />
           <Route path="dashboard" element={<AdminDashboardPage />} />
           <Route path="manager" element={<ManagerDashboardPage />} />
+           <Route path="payments" element={<AdminPaymentsPage />} />
 
           <Route
             path="billings"

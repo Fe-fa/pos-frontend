@@ -1,16 +1,23 @@
 import api from '../lib/api';
 
 export const categoryService = {
-  list(params = {}) {
-    return api.get('/categories', { params }).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/categories', { params });
+    return response.data;
   },
-  create(payload) {
-    return api.post('/categories', payload).then((res) => res.data);
+
+  async create(payload) {
+    const response = await api.post('/categories', payload);
+    return response.data;
   },
-  update(categoryId, payload) {
-    return api.put(`/categories/${categoryId}`, payload).then((res) => res.data);
+
+  async update(categoryId, payload) {
+    const response = await api.put(`/categories/${categoryId}`, payload);
+    return response.data;
   },
-  remove(categoryId) {
-    return api.delete(`/categories/${categoryId}`).then((res) => res.data);
+
+  async remove(categoryId) {
+    const response = await api.delete(`/categories/${categoryId}`);
+    return response.data;
   },
 };

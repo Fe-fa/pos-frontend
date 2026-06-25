@@ -1,53 +1,47 @@
 import api from '../lib/api';
 
 export const inventoryService = {
-  list(params = {}, config = {}) {
-    return api
-      .get('/inventory', {
-        params,
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async list(params = {}, config = {}) {
+    const response = await api.get('/inventory', {
+      params,
+      signal: config.signal,
+    });
+    return response.data;
   },
 
-  history(params = {}, config = {}) {
-    return api
-      .get('/inventory/history', {
-        params,
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async history(params = {}, config = {}) {
+    const response = await api.get('/inventory/history', {
+      params,
+      signal: config.signal,
+    });
+    return response.data;
   },
 
-  show(inventoryId, config = {}) {
-    return api
-      .get(`/inventory/${inventoryId}`, {
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async show(inventoryId, config = {}) {
+    const response = await api.get(`/inventory/${inventoryId}`, {
+      signal: config.signal,
+    });
+    return response.data;
   },
 
-  create(payload, config = {}) {
-    return api
-      .post('/inventory', payload, {
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async create(payload, config = {}) {
+    const response = await api.post('/inventory', payload, {
+      signal: config.signal,
+    });
+    return response.data;
   },
 
-  update(inventoryId, payload, config = {}) {
-    return api
-      .put(`/inventory/${inventoryId}`, payload, {
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async update(inventoryId, payload, config = {}) {
+    const response = await api.put(`/inventory/${inventoryId}`, payload, {
+      signal: config.signal,
+    });
+    return response.data;
   },
 
-  remove(inventoryId, config = {}) {
-    return api
-      .delete(`/inventory/${inventoryId}`, {
-        signal: config.signal,
-      })
-      .then((res) => res.data);
+  async remove(inventoryId, config = {}) {
+    const response = await api.delete(`/inventory/${inventoryId}`, {
+      signal: config.signal,
+    });
+    return response.data;
   },
 };

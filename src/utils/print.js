@@ -80,24 +80,26 @@ export function openBillingPrint(
 ) {
   if (!billing) return;
 
-  const settings = mergeStoreSettings({
-  ...billing.store,
-  settings: {
-    ...(storeSettings?.settings || storeSettings),
-    ...(billing.store?.settings || {}),
-  },
-});
+const settings =
+  storeSettings && Object.keys(storeSettings).length > 0
+    ? storeSettings
+    : mergeStoreSettings(billing.store ?? currentStore);
+
+
+
   const store = { ...currentStore, ...billing.store }; 
   const payment = billing.payments?.[billing.payments.length - 1];
 
-  const isPaid = Number(billing?.balance_due || 0) <= 0; // ← keep only this one at top
+  const isPaid = Number(billing?.balance_due || 0) <= 0;
 
-  const documentNumber =
-    mode === 'invoice'
-      ? billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT')
-      : isPaid
-        ? payment?.receiptnumber || billing.invnumber || (billing.billing_id ? `RCT-${billing.billing_id}` : 'DRAFT')
-        : billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT');
+const documentNumber =
+  mode === 'invoice'
+    ? billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT')
+    : isPaid
+      ? payment?.receiptnumber || billing.invnumber || (billing.billing_id ? `RCT-${billing.billing_id}` : 'DRAFT')
+      : billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT');
+
+const documentLabel = mode === 'receipt' && isPaid ? 'Receipt No' : 'Invoice No';
 
   const barcodeValue = documentNumber;
   const qrUrl =
@@ -427,9 +429,8 @@ body {
   }
 </div>
       <div class="divider"></div>
-
-      <div class="meta-row">
-        <div class="label">Receipt No</div>
+  <div class="meta-row">
+        <div class="label">${escapeHtml(documentLabel)}</div>
         <div class="value">${escapeHtml(documentNumber)}</div>
       </div>
 

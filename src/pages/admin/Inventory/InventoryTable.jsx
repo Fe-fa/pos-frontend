@@ -1,34 +1,100 @@
 import { memo, useCallback } from 'react';
-import { Edit, Trash2 } from 'lucide-react';
+import { Edit, Trash2, RefreshCw, SlidersHorizontal, Eye, AlertTriangle } from 'lucide-react';
 import { getInventoryStatus } from './inventoryHelpers';
 import PaginationControls from './PaginationControls';
 import Spinner from './Spinner';
 
-// ─── InventoryRow ─────────────────────────────────────────────────────────────
-// Memoized so only the row whose data changed re-renders, not the whole table.
+// ─── Status pill config ────────────────────────────────────────────────────────
+function getStatusPill(row) {
+  const quantity = Number(row?.quantity || 0);
+  const reorder = Number(row?.reorder_level || 0);
 
+  if (quantity <= 0) {
+    return { label: 'Out of Stock', tone: 'out', css: 'inv-pill-out' };
+  }
+  // Critical Low: quantity > 0 but <= reorder_level (and reorder > 0)
+  if (reorder > 0 && quantity <= reorder) {
+    return { label: 'Critical Low', tone: 'critical', css: 'inv-pill-critical' };
+  }
+  // Low Stock: between reorder+1 and 12
+  if (quantity <= 12) {
+    return { label: 'Low Stock', tone: 'low', css: 'inv-pill-low' };
+  }
+  return { label: 'Healthy', tone: 'normal', css: 'inv-pill-healthy' };
+}
+
+function shouldShowWarning(row) {
+  const quantity = Number(row?.quantity || 0);
+  const reorder = Number(row?.reorder_level || 0);
+  return quantity <= 0 || (reorder > 0 && quantity <= reorder) || quantity <= 12;
+}
+
+// ─── InventoryRow ──────────────────────────────────────────────────────────────
 const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending, onEdit, onDelete }) {
-  const status = getInventoryStatus(row);
+  const status = getStatusPill(row);
+  const showWarning = shouldShowWarning(row);
 
   const handleEdit = useCallback(() => onEdit(row), [onEdit, row]);
   const handleDelete = useCallback(() => onDelete(row.inventory_id), [onDelete, row.inventory_id]);
 
+  const productName = row.product?.product_name || 'Unknown product';
+  const productSku = row.product?.sku || 'No SKU';
+  const categoryName = row.product?.category?.category_name || 'Category';
+  const supplierName = row.supplier_name || row.product?.supplier_name || 'Unity Chepkirui';
+  const imageUrl = row.product?.image_url;
+
   return (
     <tr>
+      {/* Product — thumbnail + name + SKU */}
       <td>
-        <div className="catalog-item-copy">
-          <strong>{row.product?.product_name || 'Unknown product'}</strong>
-          <span>{row.product?.sku || 'No SKU'}</span>
+        <div className="inv-product-cell">
+          <div className="inv-product-thumb">
+            {imageUrl ? (
+              <img src={imageUrl} alt={productName} className="inv-product-img" />
+            ) : (
+              <div className="inv-product-img-placeholder">
+                <span>{productName.charAt(0).toUpperCase()}</span>
+              </div>
+            )}
+          </div>
+          <div className="catalog-item-copy">
+            <strong>{productName}</strong>
+            <span>{productSku}</span>
+          </div>
         </div>
       </td>
+
+      {/* Category */}
+      <td>{categoryName}</td>
+
+      {/* Batch No */}
       <td>{row.batch_no || '—'}</td>
-      <td>{row.quantity}</td>
-      <td>{row.reorder_level || 0}</td>
+
+      {/* Current Qty — with optional warning icon */}
       <td>
-        <span className={`stock-pill ${status.tone}`}>{status.label}</span>
+        <div className="inv-qty-cell">
+          <span>{row.quantity}</span>
+          {showWarning && (
+            <AlertTriangle size={14} className="inv-qty-warning" />
+          )}
+        </div>
       </td>
+
+      {/* Reorder Level */}
+      <td>{row.reorder_level || 0}</td>
+
+      {/* Supplier Name */}
+      <td>{supplierName}</td>
+
+      {/* Status */}
+      <td>
+        <span className={`inv-status-pill ${status.css}`}>{status.label}</span>
+      </td>
+
+      {/* Actions */}
       <td>
         <div className="catalog-action-group">
+          {/* Edit */}
           <button
             type="button"
             className="catalog-icon-btn"
@@ -36,8 +102,32 @@ const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending,
             title="Edit"
             disabled={!canManage}
           >
-            <Edit size={16} />
+            <Edit size={15} />
           </button>
+
+          {/* Restock (add stock) — also opens the edit/update modal */}
+          <button
+            type="button"
+            className="catalog-icon-btn"
+            onClick={handleEdit}
+            title="Restock"
+            disabled={!canManage}
+          >
+            <RefreshCw size={15} />
+          </button>
+
+          {/* Adjust */}
+          <button
+            type="button"
+            className="catalog-icon-btn"
+            onClick={handleEdit}
+            title="Adjust"
+            disabled={!canManage}
+          >
+            <SlidersHorizontal size={15} />
+          </button>
+
+          {/* View / Delete */}
           <button
             type="button"
             className="catalog-icon-btn danger"
@@ -45,7 +135,7 @@ const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending,
             title="Delete"
             disabled={!canManage || deletePending}
           >
-            <Trash2 size={16} />
+            <Trash2 size={15} />
           </button>
         </div>
       </td>
@@ -53,8 +143,7 @@ const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending,
   );
 });
 
-// ─── InventoryTable ───────────────────────────────────────────────────────────
-
+// ─── InventoryTable ────────────────────────────────────────────────────────────
 export default function InventoryTable({
   storeId,
   isLoading,
@@ -75,9 +164,11 @@ export default function InventoryTable({
           <thead>
             <tr>
               <th>Product</th>
-              <th>Batch no</th>
-              <th>Quantity</th>
-              <th>Reorder level</th>
+              <th>Category</th>
+              <th>Batch No</th>
+              <th>Current Qty</th>
+              <th>Reorder Level</th>
+              <th>Supplier Name</th>
               <th>Status</th>
               <th className="align-right">Actions</th>
             </tr>
@@ -86,13 +177,13 @@ export default function InventoryTable({
           <tbody>
             {!storeId ? (
               <tr>
-                <td colSpan="6" className="catalog-empty-cell">
+                <td colSpan="8" className="catalog-empty-cell">
                   Select a store first.
                 </td>
               </tr>
             ) : isLoading && !rows.length ? (
               <tr>
-                <td colSpan="6" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
+                <td colSpan="8" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
                   <Spinner
                     size={20}
                     style={{ margin: '0 auto', display: 'block', color: 'var(--color-text-secondary)' }}
@@ -112,7 +203,7 @@ export default function InventoryTable({
               ))
             ) : (
               <tr>
-                <td colSpan="6" className="catalog-empty-cell">
+                <td colSpan="8" className="catalog-empty-cell">
                   No inventory rows found.
                 </td>
               </tr>

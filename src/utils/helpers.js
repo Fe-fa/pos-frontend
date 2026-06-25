@@ -73,6 +73,7 @@ export function getUserHomePath(user) {
   if (user.role === 'cashier') {
     return userHasStoreAssignment(user) ? '/cashier/pos' : '/pending-approval';
   }
+  if (user.role === 'manager') return '/admin/manager'; 
   return '/admin/dashboard';
 }
 const openCreateModal = () => {

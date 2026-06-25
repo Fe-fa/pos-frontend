@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CreditCard, Gift, Smartphone, Wallet, X } from 'lucide-react';
 
 const PAYMENT_METHODS = [
-  { key: 'cash', title: 'CASH', description: 'Receive cash and enter tendered amount', icon: Wallet },
-  { key: 'mpesa', title: 'MPESA', description: 'Enter phone number and transaction code', icon: Smartphone },
-  { key: 'card', title: 'CARD', description: 'Enter card reference', icon: CreditCard },
+  { key: 'cash', title: 'CASH', icon: Wallet, tone: 'cash' },
+  { key: 'mpesa', title: 'MPESA', icon: Smartphone, tone: 'mpesa' },
+  { key: 'card', title: 'CARD', icon: CreditCard, tone: 'card' },
 ];
+
+const CASH_PRESETS = ['exact', 10, 20, 50, 100, 200, 500, 1000, 2000];
 
 export default function PaymentModal({
   isOpen,
@@ -17,7 +19,7 @@ export default function PaymentModal({
   submitting,
   currency,
   onClose,
-  onCharge, 
+  onCharge,
   loyaltyPoints = 0,
   loyaltyPointValue = 1,
   pointsToRedeem = 0,
@@ -25,8 +27,9 @@ export default function PaymentModal({
   chapa5Preview = null,
   onClaimChapa5Reward,
   loyaltyMinPoints = 0,
+  isBalanceSettlement = false,
 }) {
-  const [paymentMethod, setPaymentMethod] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('cash');
   const [amountReceived, setAmountReceived] = useState('');
   const [amountTendered, setAmountTendered] = useState('');
   const [mpesaPhone, setMpesaPhone] = useState('');
@@ -35,74 +38,149 @@ export default function PaymentModal({
   const [cardHolder, setCardHolder] = useState('');
   const [paymentError, setPaymentError] = useState('');
   const [loyaltyError, setLoyaltyError] = useState('');
+  const [receiptPreview, setReceiptPreview] = useState(false);
 
+  const invoiceSubtotal = Number(billing?.subtotal || 0);
+  const invoiceTax = Number(billing?.vat_amount || 0);
   const invoiceAmount = Number(billing?.total || 0);
+
   const activeBalance = Number(
     billing?.customer?.current_balance ??
-    selectedCustomer?.current_balance ??
-    customerCurrentBalance ??
-    0
+      selectedCustomer?.current_balance ??
+      customerCurrentBalance ??
+      0
   );
 
   const loyaltyDiscount = Math.max(
     0,
     Math.min(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
   );
-  const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
-  const combinedPayable = discountedInvoiceAmount + activeBalance;
 
-  // Initialize fields fresh every time the modal opens.
+  const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
+  const isFullyCoveredByPoints = discountedInvoiceAmount <= 0 && pointsToRedeem > 0;
+
+  const combinedPayable = isBalanceSettlement
+    ? Number(billing?.balance_due || 0)
+    : discountedInvoiceAmount + activeBalance;
+
+  const summaryNetTotal = combinedPayable;
+  const effectiveAmountToBePaid = Number(
+    isFullyCoveredByPoints ? 0 : amountReceived || combinedPayable || 0
+  );
+  const effectiveCashTendered = Number(amountTendered || 0);
+
+  const changeAmount =
+    paymentMethod === 'cash'
+      ? Math.max(effectiveCashTendered - effectiveAmountToBePaid, 0)
+      : 0;
+
+  const canClaimFreeReward =
+    !!chapa5Preview?.qualifies && Number(chapa5Preview?.claimable_free_items || 0) > 0;
+
+  const loyaltyDiscountLabel = useMemo(
+    () => currency(loyaltyDiscount, currentStore?.currency),
+    [currency, loyaltyDiscount, currentStore?.currency]
+  );
+
   useEffect(() => {
     if (!isOpen) return;
-    setPaymentMethod('');
-    setAmountReceived(combinedPayable > 0 ? String(combinedPayable) : '');
-    setAmountTendered('');
+
+    const payableString = combinedPayable > 0 ? String(combinedPayable.toFixed(2)) : '';
+
+    setPaymentMethod('cash');
+    setAmountReceived(payableString);
+    setAmountTendered(payableString);
     setMpesaPhone('');
     setMpesaCode('');
     setCardReference('');
     setCardHolder('');
     setPaymentError('');
     setLoyaltyError('');
-    // intentionally only re-running on open/close, not on every combinedPayable tick
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+    setReceiptPreview(false);
+  }, [isOpen, combinedPayable]);
 
-  // Keep the suggested amount in sync while open if loyalty redemption changes.
   useEffect(() => {
     if (!isOpen) return;
-    setAmountReceived(combinedPayable > 0 ? String(combinedPayable) : '');
+    setAmountReceived(combinedPayable > 0 ? String(combinedPayable.toFixed(2)) : '');
   }, [pointsToRedeem, isOpen, combinedPayable]);
 
   if (!isOpen) return null;
 
-  const effectiveAmountToBePaid = Number(amountReceived || combinedPayable || 0);
-  const effectiveCashTendered = Number(amountTendered || 0);
-  const changeAmount =
-    paymentMethod === 'cash'
-      ? Math.max(effectiveCashTendered - effectiveAmountToBePaid, 0).toFixed(2)
-      : '0.00';
-
-  const canClaimFreeReward =
-    !!chapa5Preview?.qualifies && Number(chapa5Preview?.claimable_free_items || 0) > 0;
-
   const handlePaymentMethodChange = (method) => {
     setPaymentMethod(method);
     setPaymentError('');
-    if (method !== 'cash') setAmountTendered('');
+
+    if (method === 'cash') {
+      setAmountTendered((prev) =>
+        prev || effectiveAmountToBePaid > 0 ? String(effectiveAmountToBePaid.toFixed(2)) : ''
+      );
+    }
+  };
+
+  const handleQuickCashSelect = (preset) => {
+    if (preset === 'exact') {
+      setAmountTendered(String(effectiveAmountToBePaid.toFixed(2)));
+      return;
+    }
+    setAmountTendered(String(Number(preset).toFixed(2)));
+  };
+
+  const handleRedeem = () => {
+    const minPoints = Number(loyaltyMinPoints ?? 0);
+
+    if (loyaltyPoints < minPoints) {
+      setLoyaltyError(`Minimum redemption is ${minPoints.toFixed(2)} points.`);
+      return;
+    }
+
+    const maxPoints = Math.min(
+      Number(loyaltyPoints || 0),
+      Math.floor(invoiceAmount / Number(loyaltyPointValue || 1))
+    );
+
+    setLoyaltyError('');
+    setPointsToRedeem(maxPoints);
+  };
+
+  const clearRedeem = () => {
+    setPointsToRedeem(0);
+    setLoyaltyError('');
   };
 
   const validatePayment = () => {
-    if (!paymentMethod) return setPaymentError('Please select a payment method.'), false;
-    if (!amountReceived || Number(amountReceived) <= 0)
-      return setPaymentError('Please enter a valid amount received.'), false;
-    if (paymentMethod === 'cash' && (!amountTendered || Number(amountTendered) <= 0))
-      return setPaymentError('Please enter the cash received amount.'), false;
-    if (paymentMethod === 'mpesa') {
-      if (!mpesaPhone.trim()) return setPaymentError('Please enter MPESA phone number.'), false;
-      if (!mpesaCode.trim()) return setPaymentError('Please enter MPESA transaction code.'), false;
+    if (!paymentMethod) {
+      setPaymentError('Please select a payment method.');
+      return false;
     }
-    if (paymentMethod === 'card' && !cardReference.trim())
-      return setPaymentError('Please enter card reference.'), false;
+
+    if (!isFullyCoveredByPoints) {
+      if (!amountReceived || Number(amountReceived) <= 0) {
+        setPaymentError('Please enter a valid amount to be paid.');
+        return false;
+      }
+
+      if (paymentMethod === 'cash' && (!amountTendered || Number(amountTendered) <= 0)) {
+        setPaymentError('Please enter the cash received amount.');
+        return false;
+      }
+    }
+
+    if (paymentMethod === 'mpesa') {
+      if (!mpesaPhone.trim()) {
+        setPaymentError('Please enter MPESA phone number.');
+        return false;
+      }
+      if (!mpesaCode.trim()) {
+        setPaymentError('Please enter MPESA transaction code.');
+        return false;
+      }
+    }
+
+    if (paymentMethod === 'card' && !cardReference.trim()) {
+      setPaymentError('Please enter card reference.');
+      return false;
+    }
+
     return true;
   };
 
@@ -113,9 +191,10 @@ export default function PaymentModal({
     try {
       await onCharge({
         paymentMethod,
-        amountReceived: Number(amountReceived || 0),
-        amountTendered:
-          paymentMethod === 'cash'
+        amountReceived: isFullyCoveredByPoints ? 0 : Number(amountReceived || 0),
+        amountTendered: isFullyCoveredByPoints
+          ? 0
+          : paymentMethod === 'cash'
             ? Number(amountTendered || amountReceived || 0)
             : Number(amountReceived || 0),
         mpesaPhone: paymentMethod === 'mpesa' ? mpesaPhone : null,
@@ -123,6 +202,7 @@ export default function PaymentModal({
         cardReference: paymentMethod === 'card' ? cardReference : null,
         cardHolder: paymentMethod === 'card' ? cardHolder || null : null,
         pointsToRedeem: Number(pointsToRedeem || 0),
+        receiptPreview,
       });
     } catch (err) {
       setPaymentError(err?.message || 'Unable to process payment.');
@@ -131,118 +211,172 @@ export default function PaymentModal({
 
   return (
     <div className="modal-backdrop" onClick={() => !submitting && onClose()}>
-      <div className="modal-card payment-modal-card" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
+      <div className="modal-card payment-modal-card payment-modal-card--wide" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header payment-modal-header">
           <div>
             <h3>Payment</h3>
             <p className="muted">{billing?.invnumber || `Draft #${billing?.billing_id || ''}`}</p>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} disabled={submitting}>
+
+          <button
+            type="button"
+            className="icon-button payment-modal-close"
+            onClick={onClose}
+            disabled={submitting}
+          >
             <X size={18} />
           </button>
         </div>
 
-        <div className="modal-content payment-modal-content">
-          <div className="payment-summary-strip">
-            <div className="payment-summary-pill">
-              <span>Sale total</span>
-              <strong>{currency(discountedInvoiceAmount, currentStore?.currency)}</strong>
+        <div className="modal-content payment-modal-content payment-modal-layout">
+          <div className="payment-modal-pane payment-modal-pane--left">
+            <div className="payment-panel-title-row">
+              <h4>Transaction Context</h4>
             </div>
 
-            <div className="payment-summary-pill">
-              <span>Items</span>
-              <strong>{itemCount}</strong>
-            </div>
+            <div className="payment-panel-card">
+              <div className="payment-context-summary">
+                <div className="payment-context-box-title">Detailed Summary</div>
 
-            {selectedCustomer ? (
-              <div className="payment-summary-pill">
-                <span>Customer</span>
-                <strong>{selectedCustomer?.full_name || 'Selected'}</strong>
+                <div className="payment-kv-list">
+                  <div className="payment-kv-row">
+                    <span>SUBTOTAL</span>
+                    <strong>{currency(invoiceSubtotal, currentStore?.currency)}</strong>
+                  </div>
+
+                  <div className="payment-kv-row">
+                    <span>DISCOUNTS (Rewards)</span>
+                    <strong className={loyaltyDiscount > 0 ? 'is-discount' : ''}>
+                      {loyaltyDiscount > 0 ? `-${loyaltyDiscountLabel}` : currency(0, currentStore?.currency)}
+                    </strong>
+                  </div>
+
+                  <div className="payment-kv-row">
+                    <span>TAX ({Number(billing?.vat_rate || 16)}%)</span>
+                    <strong>{currency(invoiceTax, currentStore?.currency)}</strong>
+                  </div>
+
+                  {!isBalanceSettlement && activeBalance > 0 ? (
+                    <div className="payment-kv-row">
+                      <span>PREVIOUS BALANCE</span>
+                      <strong>{currency(activeBalance, currentStore?.currency)}</strong>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="payment-summary-divider" />
+
+                <div className="payment-kv-row payment-kv-row--net">
+                  <span>NET TOTAL</span>
+                  <strong>{currency(summaryNetTotal, currentStore?.currency)}</strong>
+                </div>
+
+                <div className="payment-summary-divider payment-summary-divider--soft" />
+
+                <div className="payment-kv-row">
+                  <span>TOTAL ITEMS</span>
+                  <strong>{itemCount}</strong>
+                </div>
+
+                <div className="payment-switch-row">
+                  <span>RECEIPT PREVIEW</span>
+                  <button
+                    type="button"
+                    className={`payment-switch ${receiptPreview ? 'is-active' : ''}`}
+                    onClick={() => setReceiptPreview((prev) => !prev)}
+                    aria-pressed={receiptPreview}
+                  >
+                    <span className="payment-switch-thumb" />
+                  </button>
+                </div>
               </div>
-            ) : null}
+            </div>
 
-            {loyaltyPoints > 0 && selectedCustomer ? (
-              <div className="payment-summary-pill">
-                <span>Loyalty points</span>
-                <strong style={{ color: 'var(--success)' }}>{loyaltyPoints} pts</strong>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {pointsToRedeem <= 0 ? (
-                      <button
-                        type="button"
-                        className="primary-button"
-                        onClick={() => {
-                          const minPoints = loyaltyMinPoints ?? 0;
-                          if (loyaltyPoints < minPoints) {
-                            setLoyaltyError(`Minimum redemption is ${minPoints.toFixed(2)} points.`);
-                            return;
-                          }
-                          setLoyaltyError('');
-                          const maxPoints = Math.min(
-                            loyaltyPoints,
-                            Math.floor(invoiceAmount / loyaltyPointValue)
-                          );
-                          setPointsToRedeem(maxPoints);
-                        }}
-                      >
-                        Redeem
+            <div className="payment-panel-title-row payment-panel-title-row--split">
+              <h4>Customer &amp; Loyalty</h4>
+              <span className="muted small">(if applicable)</span>
+            </div>
+
+            <div className="payment-panel-card">
+              {selectedCustomer ? (
+                <div className="payment-customer-card">
+                  <div className="payment-customer-header">
+                    <strong>Customer: {selectedCustomer?.full_name || 'Selected customer'}</strong>
+                  </div>
+
+                  <div className="payment-summary-divider payment-summary-divider--soft" />
+
+                  <div className="payment-loyalty-block">
+                    <div className="payment-loyalty-copy">
+                      <span className="payment-loyalty-label">Loyalty Details</span>
+                      <strong className="payment-loyalty-points">{Number(loyaltyPoints || 0)} pts</strong>
+                    </div>
+
+                    {pointsToRedeem > 0 ? (
+                      <span className="badge success">Reward claimed</span>
+                    ) : null}
+                  </div>
+
+                  <div className="payment-loyalty-actions">
+                    {loyaltyPoints > 0 ? (
+                      <button type="button" className="primary-button" onClick={handleRedeem}>
+                        Redeem ({currency(Math.max(loyaltyPointValue, 0), currentStore?.currency)} reward)
                       </button>
                     ) : (
-                      <span style={{ fontSize: 13, color: 'var(--success)', fontWeight: 600 }}>
-                        -{currency(loyaltyDiscount, currentStore?.currency)} applied
-                      </span>
+                      <button type="button" className="primary-button" disabled>
+                        Redeem
+                      </button>
                     )}
 
                     <button
                       type="button"
-                      className="icon-button danger-icon"
-                      style={{ padding: '4px' }}
-                      title="Clear redemption"
-                      onClick={() => {
-                        setPointsToRedeem(0);
-                        setLoyaltyError('');
-                      }}
+                      className="ghost-button danger"
+                      onClick={clearRedeem}
+                      disabled={pointsToRedeem <= 0}
                     >
-                      <X size={14} />
+                      Cancel
                     </button>
                   </div>
 
-                  {loyaltyError ? (
-                    <span style={{ fontSize: 12, color: 'var(--danger, #e53e3e)' }}>{loyaltyError}</span>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-          </div>
+                  <button type="button" className="payment-benefits-link">
+                    View Benefits
+                  </button>
 
-          {chapa5Preview?.qualifies ? (
-            <div className="payment-fields-card" style={{ borderColor: '#ccead7', background: '#f6fffa' }}>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 12,
-                    flexWrap: 'wrap',
-                    padding: '12px 14px',
-                    borderRadius: 10,
-                    background: '#eaf8ef',
-                    border: '1px solid #ccead7',
-                  }}
-                >
-                  <div style={{ display: 'grid', gap: 4 }}>
-                    <strong style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {pointsToRedeem > 0 ? (
+                    <div className="payment-loyalty-applied">
+                      Applied reward discount: <strong>{loyaltyDiscountLabel}</strong>
+                    </div>
+                  ) : null}
+
+                  {loyaltyError ? <div className="payment-inline-error">{loyaltyError}</div> : null}
+                </div>
+              ) : (
+                <div className="payment-empty-mini">
+                  No customer selected. Add a customer to use loyalty rewards.
+                </div>
+              )}
+            </div>
+
+            {chapa5Preview?.qualifies ? (
+              <div className="payment-panel-card payment-panel-card--reward">
+                <div className="payment-reward-banner">
+                  <div className="payment-reward-copy">
+                    <strong>
                       <Gift size={16} />
                       Reward ready
                     </strong>
-                    <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                    <span>
                       {chapa5Preview.free_items} free item(s) available from this checkout.
                     </span>
                   </div>
 
                   {canClaimFreeReward ? (
-                    <button type="button" className="primary-button" onClick={onClaimChapa5Reward} disabled={submitting}>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={onClaimChapa5Reward}
+                      disabled={submitting}
+                    >
                       Claim reward
                     </button>
                   ) : (
@@ -250,36 +384,85 @@ export default function PaymentModal({
                   )}
                 </div>
               </div>
-            </div>
-          ) : null}
-
-          <div className="payment-method-card-grid">
-            {PAYMENT_METHODS.map((method) => {
-              const Icon = method.icon;
-              return (
-                <button
-                  key={method.key}
-                  type="button"
-                  className={`payment-method-card ${paymentMethod === method.key ? 'active' : ''}`}
-                  onClick={() => handlePaymentMethodChange(method.key)}
-                >
-                  <div className="payment-method-card-top">
-                    <span className="payment-method-icon">
-                      <Icon size={18} />
-                    </span>
-                    <strong>{method.title}</strong>
-                  </div>
-                  <p>{method.description}</p>
-                </button>
-              );
-            })}
+            ) : null}
           </div>
 
-          {paymentMethod ? (
-            <div className="payment-fields-card">
-              {paymentMethod === 'cash' ? (
-                <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div className="payment-modal-pane payment-modal-pane--right">
+            <div className="payment-panel-title-row">
+              <h4>Payment Actions</h4>
+            </div>
+
+            <div className="payment-method-tabs">
+              {PAYMENT_METHODS.map((method) => {
+                const Icon = method.icon;
+                const isActive = paymentMethod === method.key;
+
+                return (
+                  <button
+                    key={method.key}
+                    type="button"
+                    className={`payment-method-tab ${isActive ? 'active' : ''}`}
+                    onClick={() => handlePaymentMethodChange(method.key)}
+                  >
+                    <span className={`payment-method-tab-icon payment-method-tab-icon--${method.tone}`}>
+                      <Icon size={16} />
+                    </span>
+                    <strong>{method.title}</strong>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="payment-entry-card">
+              {isFullyCoveredByPoints ? (
+                <div className="payment-covered-banner">
+                  ✓ Fully covered by loyalty points — no cash required. Click Charge Payment to confirm.
+                </div>
+              ) : null}
+
+              {!isFullyCoveredByPoints && paymentMethod === 'cash' ? (
+                <>
+                  <div className="payment-amount-box">
+                    <span>Amount to be Paid</span>
+                    <strong>{currency(effectiveAmountToBePaid, currentStore?.currency)}</strong>
+                  </div>
+
+                  <label className="payment-field">
+                    <span>Cash received</span>
+                    <input
+                      className="text-input payment-cash-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={amountTendered}
+                      onChange={(e) => setAmountTendered(e.target.value)}
+                      placeholder="Cash received"
+                    />
+                  </label>
+
+                  <div className="payment-quick-grid">
+                    {CASH_PRESETS.map((preset) => (
+                      <button
+                        key={String(preset)}
+                        type="button"
+                        className="payment-quick-chip"
+                        onClick={() => handleQuickCashSelect(preset)}
+                      >
+                        {preset === 'exact' ? 'Exact' : preset}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="payment-change-box">
+                    <span>Change:</span>
+                    <strong>{currency(changeAmount, currentStore?.currency)}</strong>
+                  </div>
+                </>
+              ) : null}
+
+              {!isFullyCoveredByPoints && paymentMethod === 'mpesa' ? (
+                <div className="payment-method-form">
+                  <label className="payment-field">
                     <span>Amount to be paid</span>
                     <input
                       className="text-input"
@@ -288,49 +471,11 @@ export default function PaymentModal({
                       step="0.01"
                       value={amountReceived}
                       onChange={(e) => setAmountReceived(e.target.value)}
-                      placeholder={combinedPayable.toFixed(2)}
-                    />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span>Cash received</span>
-                    <input
-                      className="text-input"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={amountTendered}
-                      onChange={(e) => setAmountTendered(e.target.value)}
-                      placeholder="Cash tendered"
-                    />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span>Change</span>
-                    <input
-                      className="text-input"
-                      type="text"
-                      value={changeAmount}
-                      readOnly
-                      style={{ fontWeight: 'bold', backgroundColor: '#f5f5f5' }}
-                    />
-                  </label>
-                </div>
-              ) : null}
-
-              {paymentMethod === 'mpesa' ? (
-                <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span>Amount to be paid</span>
-                    <input
-                      className="text-input"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={amountReceived || combinedPayable.toFixed(2)}
-                      onChange={(e) => setAmountReceived(e.target.value)}
                       placeholder="Amount to be paid"
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+
+                  <label className="payment-field">
                     <span>MPESA phone number</span>
                     <input
                       className="text-input"
@@ -340,7 +485,8 @@ export default function PaymentModal({
                       placeholder="e.g. 07XXXXXXXX"
                     />
                   </label>
-                  <label className="span-2" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+
+                  <label className="payment-field payment-field--full">
                     <span>MPESA transaction code</span>
                     <input
                       className="text-input"
@@ -353,21 +499,22 @@ export default function PaymentModal({
                 </div>
               ) : null}
 
-              {paymentMethod === 'card' ? (
-                <div className="form-grid two-columns payment-fields-grid">
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {!isFullyCoveredByPoints && paymentMethod === 'card' ? (
+                <div className="payment-method-form">
+                  <label className="payment-field">
                     <span>Amount to be paid</span>
                     <input
                       className="text-input"
                       type="number"
                       min="0"
                       step="0.01"
-                      value={amountReceived || combinedPayable.toFixed(2)}
+                      value={amountReceived}
                       onChange={(e) => setAmountReceived(e.target.value)}
                       placeholder="Paid amount"
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+
+                  <label className="payment-field">
                     <span>Card holder</span>
                     <input
                       className="text-input"
@@ -377,7 +524,8 @@ export default function PaymentModal({
                       placeholder="Card holder name"
                     />
                   </label>
-                  <label className="span-2" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+
+                  <label className="payment-field payment-field--full">
                     <span>Card reference</span>
                     <input
                       className="text-input"
@@ -390,26 +538,33 @@ export default function PaymentModal({
                 </div>
               ) : null}
             </div>
-          ) : (
-            <div className="payment-empty-state">
-              <p>Select a payment method to show the required fields.</p>
+
+            {paymentError ? <div className="form-error payment-form-error">{paymentError}</div> : null}
+
+            <div className="payment-modal-actions payment-modal-actions--bottom">
+              <button
+                type="button"
+                className="primary-button payment-submit-btn"
+                onClick={handleChargeClick}
+                disabled={
+                  submitting ||
+                  !paymentMethod ||
+                  billing?.status === 'paid' ||
+                  (!billing?.items?.length && !isBalanceSettlement && activeBalance <= 0)
+                }
+              >
+                {billing?.status === 'paid' ? 'Already paid' : 'Charge Payment'}
+              </button>
+
+              <button
+                type="button"
+                className="ghost-button payment-cancel-btn"
+                onClick={onClose}
+                disabled={submitting}
+              >
+                Cancel
+              </button>
             </div>
-          )}
-
-          {paymentError ? <div className="form-error" style={{ margin: '0 0 8px' }}>{paymentError}</div> : null}
-
-          <div className="payment-modal-actions">
-            <button
-              type="button"
-              className="primary-button"
-              onClick={handleChargeClick}
-              disabled={!billing?.items?.length || submitting || !paymentMethod || billing?.status === 'paid'}
-            >
-              {billing?.status === 'paid' ? 'Already paid' : 'Charge Payment'}
-            </button>
-            <button type="button" className="ghost-button" onClick={onClose} disabled={submitting}>
-              Cancel
-            </button>
           </div>
         </div>
       </div>

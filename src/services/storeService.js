@@ -1,29 +1,38 @@
-import api from '../lib/api'; // Keeps your existing absolute/relative path import
+import api from '../lib/api';
 
 export const storeService = {
-  list(params = {}) {
-    return api.get('/stores', { params }).then((res) => res.data);
-  },
-  show(storeId) {
-    return api.get(`/stores/${storeId}`).then((res) => res.data);
-  },
-  create(payload) {
-    return api.post('/stores', payload).then((res) => res.data);
-  },
-  update(storeId, payload) {
-    return api.put(`/stores/${storeId}`, payload).then((res) => res.data);
-  },
-  remove(storeId) {
-    return api.delete(`/stores/${storeId}`).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/stores', { params });
+    return response.data;
   },
 
-  // 🚀 NEW: Fetch specialized settings and sequences
-  getSettings(storeId) {
-    return api.get(`/stores/${storeId}/settings`).then((res) => res.data);
+  async show(storeId) {
+    const response = await api.get(`/stores/${storeId}`);
+    return response.data;
   },
 
-  // 🚀 NEW: Update specialized settings and sequences
-  updateSettings(storeId, payload) {
-    return api.put(`/stores/${storeId}/settings`, payload).then((res) => res.data);
+  async create(payload) {
+    const response = await api.post('/stores', payload);
+    return response.data;
+  },
+
+  async update(storeId, payload) {
+    const response = await api.put(`/stores/${storeId}`, payload);
+    return response.data;
+  },
+
+  async remove(storeId) {
+    const response = await api.delete(`/stores/${storeId}`);
+    return response.data;
+  },
+
+  async getSettings(storeId) {
+    const response = await api.get(`/stores/${storeId}/settings`);
+    return response.data;
+  },
+
+  async updateSettings(storeId, payload) {
+    const response = await api.put(`/stores/${storeId}/settings`, payload);
+    return response.data;
   },
 };

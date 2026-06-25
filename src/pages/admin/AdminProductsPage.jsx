@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, X, Edit, Trash2, ChevronDown, Loader2 } from 'lucide-react';
+import {
+  Plus, X, Edit, Trash2, ChevronDown, Search,
+  Database, Wallet, AlertTriangle, Copy, Files,
+} from 'lucide-react';
 import { categoryService } from '../../services/categoryService';
 import { productService } from '../../services/productService';
 import { currency } from '../../utils/helpers';
@@ -12,16 +15,13 @@ const IMAGE_BASE_URL =
   import.meta.env.VITE_STORAGE_URL ||
   `${import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'}/storage/`;
 
-// Fallback options shown in the per-page dropdown before we know the
-// backend's actual default (ProductController defaults to 14). The real
-// default, once known from a response's meta.per_page, is merged into this
-// list so the dropdown always has a matching option even if it isn't here.
-const PER_PAGE_OPTIONS = [12, 24, 48, 100];
+const PER_PAGE_OPTIONS = [12, 16, 24, 48, 100];
 
 const initialForm = {
   category_id: '',
   sku: '',
   product_name: '',
+  description: '',
   price: '',
   cost_price: '',
   vat_rate: 0,
@@ -66,42 +66,59 @@ const resolveImageSrc = (product) => {
   return null;
 };
 
+const formatLiveTime = () => {
+  try {
+    return new Date().toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+      timeZone: 'Africa/Nairobi',
+    }) + ' EAT';
+  } catch {
+    return new Date().toLocaleTimeString();
+  }
+};
+
+/* ===================== Product Row ===================== */
 const ProductRow = memo(function ProductRow({
   product,
   currencyCode,
   canManage,
+  selected,
+  onToggleSelect,
   onEdit,
   onDelete,
+  onDuplicate,
+  onCopySku,
+  onToggleActive,
+  storeId,
 }) {
   const rowKey = getProductId(product);
   const imageSrc = resolveImageSrc(product);
+  const vatRate = Number(product.vat_rate || 0);
 
   return (
-    <tr>
+    <tr className={selected ? 'pp-row-selected' : ''}>
+      <td className="pp-cell-checkbox">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggleSelect(rowKey)}
+          disabled={!canManage}
+        />
+      </td>
+
       <td>
         {imageSrc ? (
           <img
             src={imageSrc}
             alt={product.product_name}
-            style={{
-              width: 56,
-              height: 56,
-              objectFit: 'cover',
-              borderRadius: 12,
-              border: '1px solid var(--line)',
-              background: 'var(--panel-2)',
-            }}
-            onError={(e) => {
-              e.currentTarget.style.display = 'none';
-            }}
+            className="pp-thumb"
+            onError={(e) => { e.currentTarget.style.display = 'none'; }}
           />
         ) : (
-          <div
-            className="muted"
-            style={{ fontSize: '12px', textAlign: 'center', width: 56 }}
-          >
-            No image
-          </div>
+          <div className="pp-thumb pp-thumb-empty">No image</div>
         )}
       </td>
 
@@ -113,66 +130,93 @@ const ProductRow = memo(function ProductRow({
       <td>{product.category?.category_name || '-'}</td>
 
       <td>
-        <div>{currency(product.price, currencyCode)}</div>
-        <div className="muted">
-          Cost {currency(product.cost_price, currencyCode)}
-        </div>
-        <div className="muted">
-          {Number(product.vat_rate || 0) > 0
-            ? `VAT ${Number(product.vat_rate)}%`
-            : 'No VAT'}
+        <div className="pp-pricing-cell">
+          <div className="pp-pricing-meta">
+            <span className="pp-pricing-store">
+              <Database size={11} /> Store ID: {product.store_id || storeId}
+            </span>
+            <span className="pp-pricing-base muted">(Baseline Price)</span>
+          </div>
+          <div className="pp-pricing-main">
+            {currency(product.price, currencyCode)}
+          </div>
+          <div className="muted pp-pricing-sub">
+            Cost {currency(product.cost_price, currencyCode)}
+          </div>
+          <div className="muted pp-pricing-sub">
+            {vatRate > 0 ? `VAT ${vatRate}%` : 'No VAT'}
+          </div>
         </div>
       </td>
 
       <td>
-        <span className={`status-badge ${product.is_active ? 'paid' : 'draft'}`}>
+        <span className={`pp-status-badge ${product.is_active ? 'active' : 'inactive'}`}>
           {product.is_active ? 'Active' : 'Inactive'}
         </span>
       </td>
 
       <td>
-        <div className="row-actions compact">
+        <div className="pp-row-actions">
           <button
             type="button"
-            className="ghost-button"
+            className="pp-act-btn pp-act-edit"
             onClick={() => onEdit(product)}
             title="Edit"
             disabled={!canManage}
           >
-            <Edit size={16} />
+            <Edit size={15} />
           </button>
 
           <button
             type="button"
-            className="ghost-button danger"
+            className="pp-act-btn pp-act-delete"
             onClick={() => onDelete(rowKey)}
             title="Delete"
             disabled={!canManage}
           >
-            <Trash2 size={16} />
+            <Trash2 size={15} />
           </button>
+
+          <button
+            type="button"
+            className="pp-act-btn pp-act-copy"
+            onClick={() => onCopySku(product)}
+            title="Copy SKU"
+            disabled={!canManage}
+          >
+            <Copy size={15} />
+          </button>
+
+          <button
+            type="button"
+            className="pp-act-btn pp-act-duplicate"
+            onClick={() => onDuplicate(product)}
+            title="Duplicate product"
+            disabled={!canManage}
+          >
+            <Files size={15} />
+          </button>
+
+          <label className="pp-toggle" title={product.is_active ? 'Deactivate' : 'Activate'}>
+            <input
+              type="checkbox"
+              checked={Boolean(product.is_active)}
+              onChange={() => onToggleActive(product)}
+              disabled={!canManage}
+            />
+            <span className="pp-toggle-slider" />
+          </label>
         </div>
       </td>
     </tr>
   );
 });
 
+/* ===================== Product Modal ===================== */
 const ProductModal = memo(function ProductModal({
-  show,
-  form,
-  editingId,
-  categories,
-  previewSrc,
-  error,
-  submitting,
-  canManage,
-  onClose,
-  onSubmit,
-  onFieldChange,
-  onSwitchImageMode,
-  onFileChange,
-  onImageUrlChange,
-  onClearImage,
+  show, form, editingId, categories, previewSrc, error, submitting, canManage,
+  onClose, onSubmit, onFieldChange, onSwitchImageMode, onFileChange,
+  onImageUrlChange, onClearImage,
 }) {
   if (!show) return null;
 
@@ -189,7 +233,6 @@ const ProductModal = memo(function ProductModal({
               Add product details, upload an image file, or save a direct image URL.
             </p>
           </div>
-
           <button
             type="button"
             className="icon-button"
@@ -242,6 +285,19 @@ const ProductModal = memo(function ProductModal({
                 onChange={(e) => onFieldChange('product_name', e.target.value)}
                 required
                 disabled={!canManage || submitting}
+              />
+            </label>
+
+            <label className="span-2">
+              Description
+              <textarea
+                className="text-input"
+                placeholder="Optional product description"
+                value={form.description}
+                onChange={(e) => onFieldChange('description', e.target.value)}
+                disabled={!canManage || submitting}
+                rows={3}
+                style={{ resize: 'vertical' }}
               />
             </label>
 
@@ -298,7 +354,6 @@ const ProductModal = memo(function ProductModal({
               >
                 Upload file
               </button>
-
               <button
                 type="button"
                 className={`chip ${form.image_mode === 'url' ? 'active' : ''}`}
@@ -307,7 +362,6 @@ const ProductModal = memo(function ProductModal({
               >
                 Image URL
               </button>
-
               {previewSrc ? (
                 <button
                   type="button"
@@ -352,12 +406,9 @@ const ProductModal = memo(function ProductModal({
                     src={previewSrc}
                     alt="Preview"
                     className="catalog-preview-image"
-                    onError={(e) => {
-                      e.currentTarget.style.display = 'none';
-                    }}
+                    onError={(e) => { e.currentTarget.style.display = 'none'; }}
                   />
                 </div>
-
                 <div className="catalog-preview-copy">
                   <strong>Image preview</strong>
                   <p>
@@ -406,7 +457,6 @@ const ProductModal = memo(function ProductModal({
               >
                 Cancel
               </button>
-
               <button
                 className="catalog-primary-btn"
                 type="submit"
@@ -422,6 +472,7 @@ const ProductModal = memo(function ProductModal({
   );
 });
 
+/* ===================== Main Page ===================== */
 export default function AdminProductsPage() {
   const { can } = useAuth();
   const { stores, storeId } = useStore();
@@ -435,19 +486,15 @@ export default function AdminProductsPage() {
 
   const [products, setProducts] = useState([]);
   const [meta, setMeta] = useState({ ...EMPTY_META });
+  const [stats, setStats] = useState({
+    total_active_skus: 0,
+    total_catalog_value: 0,
+    missing_image_count: 0,
+    missing_barcode_count: 0,
+  });
   const [categories, setCategories] = useState([]);
 
-  // `perPage` is intentionally undefined until the user explicitly picks a
-  // value from the dropdown. While undefined, we never send per_page to the
-  // backend, so the backend's own default (currently 14) governs. This is
-  // also the only per-page state the load depends on, so the value learned
-  // back from the server (effectivePerPage below) never triggers a
-  // redundant second fetch.
   const [perPage, setPerPage] = useState(undefined);
-
-  // Purely for display (dropdown value). Synced from meta.per_page after
-  // every successful load so the dropdown reflects the backend's true
-  // default until the user overrides it.
   const [effectivePerPage, setEffectivePerPage] = useState(undefined);
 
   const [page, setPage] = useState(1);
@@ -456,26 +503,32 @@ export default function AdminProductsPage() {
   const [form, setForm] = useState({ ...initialForm });
   const [editingId, setEditingId] = useState(null);
 
-  // Single loading flag drives the overlay spinner (replaces the old
-  // initialLoading / refreshing split with one consistent affordance).
   const [loading, setLoading] = useState(false);
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim(), 220);
 
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [taxClassFilter, setTaxClassFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const [selectedIds, setSelectedIds] = useState(new Set());
+
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  const [liveTime, setLiveTime] = useState(formatLiveTime());
+
   const categoriesRequestRef = useRef(0);
   const prevStoreIdRef = useRef(storeId);
-
-  // Ensures product fetches run one at a time, in order. If a new load
-  // request comes in while one is in flight (e.g. fast Previous/Next
-  // clicks, or a debounce firing mid-request), only the latest queued
-  // request runs once the current one finishes — preventing an older,
-  // slower response from overwriting newer state.
   const pendingParamsRef = useRef(null);
   const inFlightRef = useRef(false);
+
+  // Live ticking clock for header
+  useEffect(() => {
+    const id = setInterval(() => setLiveTime(formatLiveTime()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const previewSrc = useMemo(() => {
     if (form.clear_image) return '';
@@ -483,12 +536,7 @@ export default function AdminProductsPage() {
       return form.image_url_input.trim() || form.image_preview;
     }
     return form.image_preview;
-  }, [
-    form.clear_image,
-    form.image_mode,
-    form.image_preview,
-    form.image_url_input,
-  ]);
+  }, [form.clear_image, form.image_mode, form.image_preview, form.image_url_input]);
 
   const updateFormField = useCallback((field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -526,20 +574,16 @@ export default function AdminProductsPage() {
 
   const handleFileChange = useCallback((file) => {
     if (!file) return;
-
     const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
     if (!allowedTypes.includes(file.type)) {
       setError('Please select a valid image file: jpeg, jpg, png, or webp.');
       return;
     }
-
     if (file.size > 2 * 1024 * 1024) {
       setError('Image file size must not exceed 2MB.');
       return;
     }
-
     const localPreview = URL.createObjectURL(file);
-
     setError('');
     setForm((prev) => {
       revokeBlobUrl(prev.image_preview);
@@ -578,8 +622,16 @@ export default function AdminProductsPage() {
     });
   }, []);
 
-  // ── Sequential, queued product loader (async/await throughout) ──────────
-  const runLoadProducts = useCallback(async ({ storeId: targetStoreId, page: targetPage, search: targetSearch, perPage: targetPerPage }) => {
+  // ── Sequential, queued product loader ──
+  const runLoadProducts = useCallback(async ({
+    storeId: targetStoreId,
+    page: targetPage,
+    search: targetSearch,
+    perPage: targetPerPage,
+    categoryFilter: targetCategory,
+    taxClassFilter: targetTaxClass,
+    statusFilter: targetStatus,
+  }) => {
     if (!targetStoreId) {
       setProducts([]);
       setMeta({ ...EMPTY_META });
@@ -595,25 +647,26 @@ export default function AdminProductsPage() {
         page: targetPage,
         store_id: targetStoreId,
         ...(targetSearch ? { search: targetSearch } : {}),
-        // Only send per_page once the user has explicitly chosen one.
-        // Otherwise omit it entirely so the backend's own default applies.
         ...(targetPerPage != null ? { per_page: targetPerPage } : {}),
+        ...(targetCategory ? { category_id: targetCategory } : {}),
+        ...(targetTaxClass ? { tax_class: targetTaxClass } : {}),
+        ...(targetStatus !== '' && targetStatus != null
+          ? { is_active: targetStatus }
+          : {}),
       };
 
       const response = await productService.list(params);
 
-      // extractPaginated's second arg is just a fallback for malformed
-      // responses, not the value that should govern requests, so pass
-      // targetPerPage (which may be undefined) rather than a hardcoded const.
       const parsed = extractPaginated(response, targetPerPage);
       setProducts(parsed.data || []);
       setMeta(parsed.meta || { ...EMPTY_META });
 
-      // Learn the real per-page in effect from the server's own meta,
-      // independent of whatever the user picked, so the dropdown always
-      // reflects what was actually applied.
       if (parsed.meta?.per_page != null) {
         setEffectivePerPage(parsed.meta.per_page);
+      }
+
+      if (response?.stats) {
+        setStats(response.stats);
       }
     } catch (err) {
       setError(formatApiError(err) || 'Unable to load products.');
@@ -630,6 +683,9 @@ export default function AdminProductsPage() {
       page: params.page ?? page,
       search: 'search' in params ? params.search : debouncedSearch,
       perPage: 'perPage' in params ? params.perPage : perPage,
+      categoryFilter: 'categoryFilter' in params ? params.categoryFilter : categoryFilter,
+      taxClassFilter: 'taxClassFilter' in params ? params.taxClassFilter : taxClassFilter,
+      statusFilter: 'statusFilter' in params ? params.statusFilter : statusFilter,
     };
 
     if (inFlightRef.current) {
@@ -652,23 +708,20 @@ export default function AdminProductsPage() {
     }
 
     inFlightRef.current = false;
-  }, [storeId, page, debouncedSearch, perPage, runLoadProducts]);
+  }, [storeId, page, debouncedSearch, perPage, categoryFilter, taxClassFilter, statusFilter, runLoadProducts]);
 
-  // ── Categories loader (await fully resolved before commit, as before) ───
+  // ── Categories loader ──
   const loadCategories = useCallback(async (targetStoreId) => {
     if (!targetStoreId) {
       setCategories([]);
       return;
     }
-
     const requestId = ++categoriesRequestRef.current;
-
     try {
       const categoriesRes = await categoryService.list({
         store_id: targetStoreId,
         per_page: 100,
       });
-
       if (requestId !== categoriesRequestRef.current) return;
       setCategories(extractList(categoriesRes));
     } catch {
@@ -677,11 +730,6 @@ export default function AdminProductsPage() {
     }
   }, []);
 
-  // Single source of truth for fetching. Runs whenever storeId,
-  // debouncedSearch, page, or perPage change. perPage only changes here
-  // when the user explicitly picks a value — the backend-learned
-  // `effectivePerPage` is deliberately NOT a dependency, so syncing the
-  // dropdown after a response never causes a second, redundant fetch.
   useEffect(() => {
     const storeChanged = prevStoreIdRef.current !== storeId;
     prevStoreIdRef.current = storeId;
@@ -691,26 +739,32 @@ export default function AdminProductsPage() {
       setMeta({ ...EMPTY_META });
       setCategories([]);
       setShowModal(false);
+      setSelectedIds(new Set());
       resetForm();
       setError('');
 
-      // Let the new store's load pick up the backend default again,
-      // rather than carrying over a per_page chosen for the old store.
-      if (search !== '' || page !== 1 || perPage !== undefined) {
+      if (search !== '' || page !== 1 || perPage !== undefined ||
+          categoryFilter !== '' || taxClassFilter !== '' || statusFilter !== '') {
         setSearch('');
         setPage(1);
         setPerPage(undefined);
         setEffectivePerPage(undefined);
+        setCategoryFilter('');
+        setTaxClassFilter('');
+        setStatusFilter('');
         return;
       }
 
       if (!storeId) setLoading(false);
     }
 
-    loadProducts({ storeId, page, search: debouncedSearch, perPage });
+    loadProducts({
+      storeId, page, search: debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter,
+    });
     loadCategories(storeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storeId, debouncedSearch, page, perPage]);
+  }, [storeId, debouncedSearch, page, perPage, categoryFilter, taxClassFilter, statusFilter]);
 
   useEffect(() => {
     return () => {
@@ -726,11 +780,11 @@ export default function AdminProductsPage() {
 
       try {
         const formData = new FormData();
-
         formData.append('store_id', String(Number(storeId)));
         formData.append('category_id', String(Number(form.category_id)));
         formData.append('sku', form.sku.trim());
         formData.append('product_name', form.product_name.trim());
+        formData.append('description', form.description || '');
         formData.append('price', String(Number(form.price)));
         formData.append('cost_price', String(Number(form.cost_price)));
         formData.append(
@@ -759,7 +813,10 @@ export default function AdminProductsPage() {
         if (!editingId && page !== 1) {
           setPage(1);
         } else {
-          await loadProducts({ storeId, page, search: debouncedSearch, perPage });
+          await loadProducts({
+            storeId, page, search: debouncedSearch, perPage,
+            categoryFilter, taxClassFilter, statusFilter,
+          });
         }
       } catch (err) {
         setError(formatApiError(err));
@@ -767,12 +824,12 @@ export default function AdminProductsPage() {
         setSubmitting(false);
       }
     },
-    [storeId, form, editingId, page, debouncedSearch, perPage, loadProducts, resetForm]
+    [storeId, form, editingId, page, debouncedSearch, perPage,
+     categoryFilter, taxClassFilter, statusFilter, loadProducts, resetForm]
   );
 
   const handleEdit = useCallback((product) => {
     const id = getProductId(product);
-
     if (!id) {
       console.warn('No valid ID found on product:', product);
       return;
@@ -786,6 +843,7 @@ export default function AdminProductsPage() {
         category_id: product.category_id || '',
         sku: product.sku || '',
         product_name: product.product_name || '',
+        description: product.description || '',
         price: product.price || '',
         cost_price: product.cost_price || '',
         vat_rate: product.vat_rate || '',
@@ -808,18 +866,73 @@ export default function AdminProductsPage() {
 
       try {
         await productService.remove(productId);
-
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(productId);
+          return next;
+        });
         if (products.length === 1 && page > 1) {
           setPage((prev) => prev - 1);
         } else {
-          await loadProducts({ storeId, page, search: debouncedSearch, perPage });
+          await loadProducts({
+            storeId, page, search: debouncedSearch, perPage,
+            categoryFilter, taxClassFilter, statusFilter,
+          });
         }
       } catch (err) {
         setError(formatApiError(err) || 'Unable to delete product.');
       }
     },
-    [products.length, page, storeId, debouncedSearch, perPage, loadProducts]
+    [products.length, page, storeId, debouncedSearch, perPage,
+     categoryFilter, taxClassFilter, statusFilter, loadProducts]
   );
+
+  const handleDuplicate = useCallback((product) => {
+    resetForm();
+    setForm((prev) => ({
+      ...prev,
+      category_id: product.category_id || '',
+      sku: `${product.sku || ''}-COPY`,
+      product_name: `${product.product_name || ''} (Copy)`,
+      description: product.description || '',
+      price: product.price || '',
+      cost_price: product.cost_price || '',
+      vat_rate: product.vat_rate || 0,
+      apply_vat: Number(product.vat_rate || 0) > 0,
+      is_active: Boolean(product.is_active),
+    }));
+    setEditingId(null);
+    setShowModal(true);
+  }, [resetForm]);
+
+  const handleCopySku = useCallback((product) => {
+    if (!product?.sku) return;
+    try {
+      navigator.clipboard?.writeText(product.sku);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const handleToggleActive = useCallback(async (product) => {
+    const id = getProductId(product);
+    if (!id) return;
+
+    try {
+      const formData = new FormData();
+      formData.append('store_id', String(Number(product.store_id || storeId)));
+      formData.append('is_active', product.is_active ? '0' : '1');
+      formData.append('_method', 'PUT');
+      await productService.update(id, formData);
+      await loadProducts({
+        storeId, page, search: debouncedSearch, perPage,
+        categoryFilter, taxClassFilter, statusFilter,
+      });
+    } catch (err) {
+      setError(formatApiError(err) || 'Unable to toggle product status.');
+    }
+  }, [storeId, page, debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter, loadProducts]);
 
   const handleSearchChange = useCallback((e) => {
     const nextValue = e.target.value;
@@ -842,6 +955,78 @@ export default function AdminProductsPage() {
     setPage((prev) => Math.min(prev + 1, meta.last_page || 1));
   }, [meta.last_page]);
 
+  /* ── Selection helpers ── */
+  const toggleSelect = useCallback((id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds((prev) => {
+      const allIds = products.map(getProductId).filter(Boolean);
+      const allSelected = allIds.length > 0 && allIds.every((id) => prev.has(id));
+      if (allSelected) return new Set();
+      return new Set(allIds);
+    });
+  }, [products]);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  const allOnPageSelected = useMemo(() => {
+    const allIds = products.map(getProductId).filter(Boolean);
+    return allIds.length > 0 && allIds.every((id) => selectedIds.has(id));
+  }, [products, selectedIds]);
+
+  /* ── Bulk actions ── */
+  const handleBulkClone = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    if (!window.confirm(`Clone ${selectedIds.size} selected product(s)?`)) return;
+    // Implementation: would call a bulk-clone API. Here, just notify.
+    alert('Bulk clone action — wire to your backend bulk endpoint.');
+    clearSelection();
+  }, [selectedIds, clearSelection]);
+
+  const handleBulkExport = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    const selected = products.filter((p) => selectedIds.has(getProductId(p)));
+    const rows = [
+      ['SKU', 'Product Name', 'Category', 'Price', 'Cost Price', 'VAT Rate', 'Status'],
+      ...selected.map((p) => [
+        p.sku,
+        p.product_name,
+        p.category?.category_name || '',
+        p.price,
+        p.cost_price,
+        p.vat_rate || 0,
+        p.is_active ? 'Active' : 'Inactive',
+      ]),
+    ];
+    const csv = rows.map((r) =>
+      r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')
+    ).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `products-export-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [products, selectedIds]);
+
+  const handleBulkChangeCategory = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    alert('Bulk change category — wire to your backend bulk endpoint.');
+  }, [selectedIds]);
+
+  const handleBulkApplyTaxRate = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    alert('Bulk apply tax rate — wire to your backend bulk endpoint.');
+  }, [selectedIds]);
+
   const tableRows = useMemo(
     () =>
       products.map((product) => (
@@ -850,199 +1035,268 @@ export default function AdminProductsPage() {
           product={product}
           currencyCode={currentStore?.currency}
           canManage={canManage}
+          selected={selectedIds.has(getProductId(product))}
+          onToggleSelect={toggleSelect}
           onEdit={handleEdit}
           onDelete={handleDelete}
+          onDuplicate={handleDuplicate}
+          onCopySku={handleCopySku}
+          onToggleActive={handleToggleActive}
+          storeId={storeId}
         />
       )),
-    [products, currentStore?.currency, canManage, handleEdit, handleDelete]
+    [products, currentStore?.currency, canManage, selectedIds, toggleSelect,
+     handleEdit, handleDelete, handleDuplicate, handleCopySku, handleToggleActive, storeId]
   );
 
-  // Whatever is currently in effect (user choice, or backend-learned
-  // default once known), for the dropdown's value.
   const displayedPerPage = effectivePerPage ?? meta.per_page ?? '';
 
-  // Ensure the dropdown always has an option matching the current value,
-  // even if it isn't one of the hardcoded common choices (e.g. backend
-  // default of 14 isn't in PER_PAGE_OPTIONS).
   const perPageOptions = useMemo(() => {
     const opts = new Set(PER_PAGE_OPTIONS);
     if (displayedPerPage !== '') opts.add(Number(displayedPerPage));
     return Array.from(opts).sort((a, b) => a - b);
   }, [displayedPerPage]);
 
+  const currencyCode = currentStore?.currency || 'KSH';
+
   return (
     <>
-      <style>{`
-        @keyframes products-spin { to { transform: rotate(360deg); } }
-        .spin-icon { animation: products-spin 0.8s linear infinite; }
-        .products-page-wrapper { position: relative; }
-        .products-loading-overlay {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: rgba(255, 255, 255, 0.55);
-          z-index: 20;
-          border-radius: 12px;
-          pointer-events: none;
-        }
-      `}</style>
-
-      <div className="products-page-wrapper">
-        {loading ? (
-          <div className="products-loading-overlay">
-            <Loader2 size={32} className="spin-icon" />
+      <div className="products-page-wrapper pp-page">
+        {/* ===== Header ===== */}
+        <div className="pp-header">
+          <div>
+            <h2 className="pp-title">Products</h2>
+            <p className="pp-subtitle">
+              {meta.from && meta.to
+                ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
+                : `${products.length} products in catalog`}
+            </p>
           </div>
-        ) : null}
-
-        <section className="stack-lg">
-          <div
-            className="catalog-hero"
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              width: '100%',
-            }}
-          >
-            <div
-              className="catalog-hero-copy"
-              style={{ display: 'flex', flexDirection: 'column' }}
-            >
-              <h2 className="catalog-title">Products</h2>
-              <p className="catalog-subtitle">
-                {meta.from && meta.to
-                  ? `Showing ${meta.from}–${meta.to} of ${meta.total}`
-                  : `${products.length} products in catalog`}
-              </p>
-            </div>
-
+          <div className="pp-header-right">
+            <span className="pp-clock">{liveTime}</span>
             <button
               type="button"
-              className="ghost-button"
+              className="pp-new-btn"
               onClick={openCreateModal}
               disabled={!storeId || !canManage}
             >
-              <Plus size={18} />
-              New product
+              <Plus size={16} /> New product
             </button>
           </div>
+        </div>
 
-          <div className="catalog-toolbar">
-            <label className="catalog-search">
-              <input
-                className="text-input"
-                type="text"
-                placeholder="Search product"
-                value={search}
-                onChange={handleSearchChange}
-                disabled={!storeId}
-              />
-            </label>
-
-            <div
-              style={{
-                position: 'relative',
-                display: 'inline-flex',
-                alignItems: 'center',
-              }}
-            >
-              <ChevronDown
-                size={14}
-                style={{
-                  position: 'absolute',
-                  right: 8,
-                  pointerEvents: 'none',
-                  color: 'var(--color-text-secondary)',
-                }}
-              />
-              <select
-                className="text-input"
-                value={displayedPerPage}
-                onChange={handlePerPageChange}
-                disabled={!storeId}
-                style={{ width: 'auto', paddingRight: 28, appearance: 'none' }}
-              >
-                {perPageOptions.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
+        {/* ===== Summary Cards ===== */}
+        <div className="pp-summary-grid">
+          <div className="pp-summary-card">
+            <div className="pp-summary-icon pp-tone-blue">
+              <Database size={20} />
             </div>
-
-            <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
+            <div className="pp-summary-body">
+              <span className="pp-summary-label">Total Active SKUs</span>
+              <strong className="pp-summary-value">{stats.total_active_skus}</strong>
+              <a className="pp-drilldown" href="#">Drill down ›</a>
+            </div>
           </div>
 
-          {error && !showModal ? <p className="form-error">{error}</p> : null}
-
-          <article className="catalog-table-card">
-            <div className="table-wrap">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Image</th>
-                    <th>Product</th>
-                    <th>Category</th>
-                    <th>Pricing</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {!storeId ? (
-                    <tr>
-                      <td colSpan="6">Select a store first.</td>
-                    </tr>
-                  ) : products.length ? (
-                    tableRows
-                  ) : !loading ? (
-                    <tr>
-                      <td colSpan="6">No products found.</td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
+          <div className="pp-summary-card">
+            <div className="pp-summary-icon pp-tone-green">
+              <Wallet size={20} />
             </div>
+            <div className="pp-summary-body">
+              <span className="pp-summary-label">Total Catalog Value (Retail {currencyCode})</span>
+              <strong className="pp-summary-value">
+                {currency(stats.total_catalog_value, currencyCode)}
+              </strong>
+              <a className="pp-drilldown" href="#">Drill down ›</a>
+            </div>
+          </div>
 
-            {storeId ? (
-              <div
-                className="row-actions"
-                style={{
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginTop: 16,
-                }}
-              >
-                <span className="muted">
-                  Page {meta.current_page || 1} of {meta.last_page || 1}
-                </span>
-
-                <div className="row-actions compact">
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={handlePrevPage}
-                    disabled={!meta.has_prev_page || loading}
-                  >
-                    Previous
-                  </button>
-
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={handleNextPage}
-                    disabled={!meta.has_next_page || loading}
-                  >
-                    Next
-                  </button>
-                </div>
+          <div className="pp-summary-card">
+            <div className="pp-summary-icon pp-tone-red">
+              <AlertTriangle size={20} />
+            </div>
+            <div className="pp-summary-body">
+              <span className="pp-summary-label">Missing Data Warnings</span>
+              <div className="pp-summary-warn-list">
+                <span>{stats.missing_image_count} items missing image</span>
+                <span>{stats.missing_barcode_count} missing barcodes</span>
               </div>
-            ) : null}
-          </article>
-        </section>
+              <a className="pp-drilldown" href="#">Drill down ›</a>
+            </div>
+          </div>
+        </div>
+
+        {/* ===== Filter Toolbar ===== */}
+        <div className="pp-toolbar">
+          <div className="pp-search-wrap">
+            <Search size={15} className="pp-search-icon" />
+            <input
+              type="text"
+              className="pp-input pp-search-input"
+              placeholder="Search product"
+              value={search}
+              onChange={handleSearchChange}
+              disabled={!storeId}
+            />
+          </div>
+
+          <div className="pp-select-wrap">
+            <select
+              className="pp-input pp-select"
+              value={categoryFilter}
+              onChange={(e) => { setCategoryFilter(e.target.value); setPage(1); }}
+              disabled={!storeId}
+            >
+              <option value="">Category</option>
+              {categories.map((c) => (
+                <option key={c.category_id} value={c.category_id}>
+                  {c.category_name}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="pp-select-caret" />
+          </div>
+
+          <div className="pp-select-wrap">
+            <select
+              className="pp-input pp-select"
+              value={taxClassFilter}
+              onChange={(e) => { setTaxClassFilter(e.target.value); setPage(1); }}
+              disabled={!storeId}
+            >
+              <option value="">Tax Class</option>
+              <option value="vat">VAT applied</option>
+              <option value="no_vat">No VAT</option>
+            </select>
+            <ChevronDown size={14} className="pp-select-caret" />
+          </div>
+
+          <div className="pp-select-wrap">
+            <select
+              className="pp-input pp-select"
+              value={statusFilter}
+              onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+              disabled={!storeId}
+            >
+              <option value="">Status</option>
+              <option value="true">Active</option>
+              <option value="false">Inactive</option>
+            </select>
+            <ChevronDown size={14} className="pp-select-caret" />
+          </div>
+
+          <div className="pp-select-wrap pp-perpage-wrap">
+            <select
+              className="pp-input pp-select"
+              value={displayedPerPage}
+              onChange={handlePerPageChange}
+              disabled={!storeId}
+            >
+              {perPageOptions.map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="pp-select-caret" />
+          </div>
+
+          <div className="pp-storeid-label">Store ID: {storeId || '-'}</div>
+        </div>
+
+        {error && !showModal ? <p className="form-error">{error}</p> : null}
+
+        {/* ===== Table ===== */}
+        <div className="pp-table-card">
+          <div className="table-wrap">
+            <table className="data-table pp-table">
+              <thead>
+                <tr>
+                  <th className="pp-cell-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      onChange={toggleSelectAll}
+                      disabled={!canManage || products.length === 0}
+                    />
+                  </th>
+                  <th>Image</th>
+                  <th>Product</th>
+                  <th>Category</th>
+                  <th>Pricing</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!storeId ? (
+                  <tr>
+                    <td colSpan="7">Select a store first.</td>
+                  </tr>
+                ) : products.length ? (
+                  tableRows
+                ) : !loading ? (
+                  <tr>
+                    <td colSpan="7">No products found.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+
+          {storeId ? (
+            <div className="pp-pagination">
+              <span className="muted">
+                Page {meta.current_page || 1} of {meta.last_page || 1}
+              </span>
+              <div className="row-actions compact">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={handlePrevPage}
+                  disabled={!meta.has_prev_page || loading}
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={handleNextPage}
+                  disabled={!meta.has_next_page || loading}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* ===== Floating Bulk Actions Bar ===== */}
+        {selectedIds.size > 0 ? (
+          <div className="pp-bulk-bar">
+            <div className="pp-bulk-icons">
+              <Files size={15} />
+              <Trash2 size={15} />
+            </div>
+            <span className="pp-bulk-title">Bulk Actions:</span>
+            <button type="button" className="pp-bulk-link" onClick={handleBulkClone}>
+              Clone
+            </button>
+            <span className="pp-bulk-sep">|</span>
+            <button type="button" className="pp-bulk-link" onClick={handleBulkChangeCategory}>
+              Change Category
+            </button>
+            <span className="pp-bulk-sep">|</span>
+            <button type="button" className="pp-bulk-link" onClick={handleBulkApplyTaxRate}>
+              Apply Tax Rate
+            </button>
+            <span className="pp-bulk-sep">|</span>
+            <button type="button" className="pp-bulk-link" onClick={handleBulkExport}>
+              Export
+            </button>
+            <button type="button" className="pp-bulk-close" onClick={clearSelection}>
+              <ChevronDown size={14} />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <ProductModal

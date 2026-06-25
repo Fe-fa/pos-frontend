@@ -1,59 +1,73 @@
 import api from '../lib/api';
 
 export const billingService = {
-  list(params = {}) {
-    return api.get('/billings', { params }).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/billings', { params });
+    return response.data;
   },
 
-  createDraft(payload) {
-    return api.post('/billings', payload).then((res) => res.data);
+  async createDraft(payload) {
+    const response = await api.post('/billings', payload);
+    return response.data;
   },
 
-  show(billingId) {
-    return api.get(`/billings/${billingId}`).then((res) => res.data);
+  async show(billingId) {
+    const response = await api.get(`/billings/${billingId}`);
+    return response.data;
   },
 
-  update(billingId, payload) {
-    return api.put(`/billings/${billingId}`, payload).then((res) => res.data);
+  async update(billingId, payload) {
+    const response = await api.put(`/billings/${billingId}`, payload);
+    return response.data;
   },
 
-  destroy(billingId) {
-    return api.delete(`/billings/${billingId}`).then((res) => res.data);
+  async destroy(billingId) {
+    const response = await api.delete(`/billings/${billingId}`);
+    return response.data;
   },
 
-  remove(billingId) {
-    return api.delete(`/billings/${billingId}`).then((res) => res.data);
+  async remove(billingId) {
+    const response = await api.delete(`/billings/${billingId}`);
+    return response.data;
   },
 
-  restore(billingId) {
-    return api.post(`/billings/${billingId}/restore`).then((res) => res.data);
+  async restore(billingId) {
+    const response = await api.post(`/billings/${billingId}/restore`);
+    return response.data;
   },
 
-  items(billingId, params = {}) {
-    return api.get(`/billings/${billingId}/items`, { params }).then((res) => res.data);
+  // async items(billingId, params = {}) {
+  //   const response = await api.get(`/billings/${billingId}/items`, { params });
+  //   return response.data;
+  // },
+
+  async addItem(billingId, payload) {
+    const response = await api.post(`/billings/${billingId}/items`, payload);
+    return response.data;
   },
 
-  addItem(billingId, payload) {
-    return api.post(`/billings/${billingId}/items`, payload).then((res) => res.data);
+  async showItem(billingItemId) {
+    const response = await api.get(`/billing-items/${billingItemId}`);
+    return response.data;
   },
 
-  showItem(billingItemId) {
-    return api.get(`/billing-items/${billingItemId}`).then((res) => res.data);
+  async updateItem(billingItemId, payload) {
+    const response = await api.put(`/billing-items/${billingItemId}`, payload);
+    return response.data;
   },
 
-  updateItem(billingItemId, payload) {
-    return api.put(`/billing-items/${billingItemId}`, payload).then((res) => res.data);
+  async removeItem(billingItemId) {
+    const response = await api.delete(`/billing-items/${billingItemId}`);
+    return response.data;
   },
 
-  removeItem(billingItemId) {
-    return api.delete(`/billing-items/${billingItemId}`).then((res) => res.data);
+  async restoreItem(billingItemId) {
+    const response = await api.post(`/billing-items/${billingItemId}/restore`);
+    return response.data;
   },
 
-  restoreItem(billingItemId) {
-    return api.post(`/billing-items/${billingItemId}/restore`).then((res) => res.data);
-  },
-
-  charge(billingId, payload) {
-    return api.post(`/billings/${billingId}/charge`, payload).then((res) => res.data);
+  async charge(billingId, payload) {
+    const response = await api.post(`/billings/${billingId}/charge`, payload);
+    return response.data;
   },
 };

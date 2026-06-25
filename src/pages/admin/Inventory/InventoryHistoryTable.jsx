@@ -3,41 +3,77 @@ import { getHistoryTone, formatSignedQty } from './inventoryHelpers';
 import PaginationControls from './PaginationControls';
 import Spinner from './Spinner';
 
-// ─── HistoryRow ───────────────────────────────────────────────────────────────
+// ─── Event type label map ──────────────────────────────────────────────────────
+function getEventTypeLabel(changeType) {
+  const map = {
+    sale: 'Sale',
+    stock_out: 'Sale',
+    stock_in: 'Restock',
+    restock: 'Restock',
+    opening_stock: 'Opening Stock',
+    return: 'Return',
+    adjustment: 'Adjustment',
+    fifo_out: 'Sale',
+    consume: 'Sale',
+  };
+  if (!changeType) return '—';
+  return map[changeType.toLowerCase()] || changeType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
+// ─── HistoryRow ────────────────────────────────────────────────────────────────
 const HistoryRow = memo(function HistoryRow({ row }) {
+  const eventLabel = getEventTypeLabel(row.change_type);
+  const tone = getHistoryTone(row.quantity_changed);
+
+  const userName =
+    row.user?.full_name ||
+    [row.user?.first_name, row.user?.last_name].filter(Boolean).join(' ') ||
+    row.user?.name ||
+    row.user?.email ||
+    'System';
+
   return (
     <tr>
-      <td>{row.created_at ? new Date(row.created_at).toLocaleString() : '-'}</td>
+      {/* Timestamp */}
+      <td style={{ whiteSpace: 'nowrap' }}>
+        {row.created_at ? new Date(row.created_at).toLocaleString() : '-'}
+      </td>
+
+      {/* Event Type */}
+      <td>
+        <span className={`inv-event-pill inv-event-${tone}`}>{eventLabel}</span>
+      </td>
+
+      {/* Product */}
       <td>
         <div className="catalog-item-copy">
           <strong>{row.product?.product_name || 'Unknown product'}</strong>
-          <span>{row.product?.sku || 'No SKU'}</span>
+          <span>{row.product?.sku || ''}</span>
         </div>
       </td>
-      <td>{row.batch_no || '—'}</td>
+
+      {/* Qty Change */}
       <td>
-        <span className={`history-change-pill ${getHistoryTone(row.quantity_changed)}`}>
+        <span className={`history-change-pill ${tone}`}>
           {formatSignedQty(row.quantity_changed)}
         </span>
       </td>
-      <td>{row.quantity_before ?? 0}</td>
+
+      {/* New On-Hand (quantity_after) */}
       <td>{row.quantity_after ?? 0}</td>
-      <td>{row.change_type || '-'}</td>
-      <td>
-        <div className="catalog-item-copy">
-          <strong>{row.reference || '—'}</strong>
-          <span>
-            {row.user?.full_name || row.user?.name || row.user?.email || 'System'}
-          </span>
-        </div>
+
+      {/* Reference */}
+      <td style={{ whiteSpace: 'nowrap' }}>
+        <strong style={{ fontSize: 12, display: 'block' }}>{row.reference || '—'}</strong>
       </td>
+
+      {/* User / Cashier */}
+      <td>{userName}</td>
     </tr>
   );
 });
 
-// ─── InventoryHistoryTable ────────────────────────────────────────────────────
-
+// ─── InventoryHistoryTable ─────────────────────────────────────────────────────
 export default function InventoryHistoryTable({
   storeId,
   isLoading,
@@ -50,39 +86,29 @@ export default function InventoryHistoryTable({
   onPreviousPage,
   onNextPage,
 }) {
-  // Merge backend default into the preset list, deduped + sorted.
   const resolvedOptions =
     pageSize !== null
       ? [...new Set([...pageSizeOptions, pageSize])].sort((a, b) => a - b)
       : pageSizeOptions;
 
+  const currentPage = pagination?.current_page || 1;
+  const lastPage = pagination?.last_page || 1;
+  const total = pagination?.total || 0;
+  const from = pagination?.from || 0;
+  const to = pagination?.to || 0;
+
   return (
     <article className="catalog-table-card">
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 12,
-          marginBottom: 12,
-          flexWrap: 'wrap',
-        }}
-      >
+      {/* Header */}
+      <div className="inv-history-header">
         <div className="catalog-hero-copy">
-          <h3 className="catalog-title" style={{ fontSize: '1.05rem' }}>
-            Inventory history
-          </h3>
-          <p
-            className="catalog-subtitle"
-            style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 20 }}
-          >
-            {isFetching && rows.length > 0 && (
-              <>
-                <Spinner size={12} style={{ color: 'var(--color-text-secondary)' }} />
-                Refreshing history…
-              </>
-            )}
-          </p>
+          <h3 className="inv-history-title">Comprehensive Inventory Ledger &amp; History</h3>
+          {isFetching && rows.length > 0 && (
+            <p className="catalog-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Spinner size={12} style={{ color: 'var(--color-text-secondary)' }} />
+              Refreshing…
+            </p>
+          )}
         </div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -92,6 +118,7 @@ export default function InventoryHistoryTable({
             value={pageSize ?? ''}
             onChange={onPageSizeChange}
             disabled={!storeId || pageSize === null}
+            style={{ minWidth: 72 }}
           >
             {pageSize === null ? (
               <option value="">Loading…</option>
@@ -106,31 +133,31 @@ export default function InventoryHistoryTable({
         </label>
       </div>
 
+      {/* Table */}
       <div className="table-wrap">
         <table className="data-table">
           <thead>
             <tr>
-              <th>Date</th>
+              <th>Timestamp</th>
+              <th>Event Type</th>
               <th>Product</th>
-              <th>Batch no</th>
-              <th>Change</th>
-              <th>Before</th>
-              <th>After</th>
-              <th>Action</th>
-              <th>Reference / User</th>
+              <th>Qty Change</th>
+              <th>New On-Hand</th>
+              <th>Reference</th>
+              <th>User/Cashier</th>
             </tr>
           </thead>
 
           <tbody>
             {!storeId ? (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell">
+                <td colSpan="7" className="catalog-empty-cell">
                   Select a store first.
                 </td>
               </tr>
             ) : isLoading && !rows.length ? (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
+                <td colSpan="7" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
                   <Spinner
                     size={20}
                     style={{ margin: '0 auto', display: 'block', color: 'var(--color-text-secondary)' }}
@@ -143,7 +170,7 @@ export default function InventoryHistoryTable({
               ))
             ) : (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell">
+                <td colSpan="7" className="catalog-empty-cell">
                   No inventory history found.
                 </td>
               </tr>
@@ -152,13 +179,22 @@ export default function InventoryHistoryTable({
         </table>
       </div>
 
+      {/* Footer — pagination + sync status */}
       {storeId ? (
-        <PaginationControls
-          pagination={pagination}
-          isFetching={isFetching}
-          onPrevious={onPreviousPage}
-          onNext={onNextPage}
-        />
+        <div className="inv-history-footer">
+          <PaginationControls
+            pagination={pagination}
+            isFetching={isFetching}
+            onPrevious={onPreviousPage}
+            onNext={onNextPage}
+          />
+          <p className="inv-sync-note muted">
+            Page {currentPage} of {lastPage}
+            {total > 0 ? ` | Showing ${from}-${to} of ${total} lines` : ''}
+            {' '}| All data synchronized{' '}
+            <span style={{ fontStyle: 'italic' }}>(Last: 2 mins ago)</span>
+          </p>
+        </div>
       ) : null}
     </article>
   );

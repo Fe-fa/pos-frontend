@@ -1,23 +1,28 @@
 import api from '../lib/api';
 
 export const customerService = {
-  list(params = {}) {
-    return api.get('/customers', { params }).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/customers', { params });
+    return response.data;
   },
 
-  show(customerId) {
-    return api.get(`/customers/${customerId}`).then((res) => res.data);
+  async show(customerId) {
+    const response = await api.get(`/customers/${customerId}`);
+    return response.data;
   },
 
-  create(payload) {
-    return api.post('/customers', payload).then((res) => res.data);
+  async create(payload) {
+    const response = await api.post('/customers', payload);
+    return response.data;
   },
 
-  update(customerId, payload) {
-    return api.put(`/customers/${customerId}`, payload).then((res) => res.data);
+  async update(customerId, payload) {
+    const response = await api.put(`/customers/${customerId}`, payload);
+    return response.data;
   },
 
-  remove(customerId) {
-    return api.delete(`/customers/${customerId}`).then((res) => res.data);
+  async remove(customerId) {
+    const response = await api.delete(`/customers/${customerId}`);
+    return response.data;
   },
 };

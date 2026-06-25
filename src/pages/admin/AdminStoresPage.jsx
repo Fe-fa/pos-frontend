@@ -5,7 +5,6 @@ import {
   Store as StoreIcon,
   Edit,
   Ban,
-  Loader2,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { storeService } from '../../services/storeService';
@@ -278,16 +277,15 @@ export default function AdminStoresPage() {
       </section>
     );
   }
-
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
     <section className="stack-lg" style={{ position: 'relative' }}>
 
-      {/* Keyframe injected once */}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+   
+      {/* <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
-      {/* Page-level spinner overlay — hidden while a modal submit is running (modal has its own) */}
+
       {loading && !submitting && (
         <div
           style={{
@@ -310,7 +308,7 @@ export default function AdminStoresPage() {
             style={{ animation: 'spin 0.8s linear infinite', color: 'var(--color-primary, #6366f1)' }}
           />
         </div>
-      )}
+      )} */}
 
       {/* ── Page header ── */}
       <div className="section-header">

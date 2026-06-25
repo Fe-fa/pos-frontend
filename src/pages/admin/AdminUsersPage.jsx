@@ -1,4 +1,4 @@
-import { X, Plus, ChevronDown, Loader2, CheckCircle } from 'lucide-react';
+import { X, Plus, ChevronDown, CheckCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
@@ -322,9 +322,6 @@ export default function AdminUsersPage() {
     <>
       <section className="stack-lg" style={{ position: 'relative' }}>
 
-       {/* Keyframe for spinner (injected once) */}
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-
         {/* ── Section header + controls (horizontal toolbar) ── */}
         <div className="section-header split-header">
           <div>
@@ -490,12 +487,7 @@ export default function AdminUsersPage() {
              <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan="6" style={{ textAlign: 'center', padding: '32px 0' }}>
-                      <Loader2
-                        size={24}
-                        style={{ animation: 'spin 0.8s linear infinite', color: 'var(--brand-blue)' }}
-                      />
-                    </td>
+                    <td colSpan="6">Loading...</td>
                   </tr>
                 ) : !rows.length ? (
                   <tr><td colSpan="6">No users found.</td></tr>
@@ -730,9 +722,7 @@ export default function AdminUsersPage() {
                 <div className="catalog-modal-actions span-2">
                   <button type="button" className="ghost-button" onClick={closeFormModal} disabled={submitting}>Cancel</button>
                   <button className="catalog-primary-btn" type="submit" disabled={submitting}>
-                    {submitting
-                      ? <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />{editingUser ? 'Saving…' : 'Creating…'}</span>
-                      : editingUser ? 'Save changes' : 'Create user'}
+                    {submitting ? (editingUser ? 'Saving…' : 'Creating…') : editingUser ? 'Save changes' : 'Create user'}
                   </button>
                 </div>
               </form>
@@ -779,10 +769,8 @@ export default function AdminUsersPage() {
 
                 <div className="catalog-modal-actions">
                   <button type="button" className="ghost-button" onClick={closeAssignModal} disabled={submitting}>Cancel</button>
-                  <button className="catalog-primary-btn" disabled={submitting}>
-                    {submitting
-                      ? <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />Saving…</span>
-                      : 'Save assignment'}
+            <button className="catalog-primary-btn" disabled={submitting}>
+                    {submitting ? 'Saving…' : 'Save assignment'}
                   </button>
                 </div>
               </form>

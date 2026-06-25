@@ -6,9 +6,13 @@ import { useTheme } from '../../contexts/ThemeContext';
 
 export default function CashierLayout() {
   const navigate = useNavigate();
-  const { logout, user, hasRole } = useAuth();
+  const { logout, user } = useAuth();
   const { activeStore } = useStore();
   const { theme, toggleTheme } = useTheme();
+
+  const isAdmin   = user?.role === 'admin';
+  const isManager = user?.role === 'manager';
+  const canGoBack = isAdmin || isManager;
 
   const handleLogout = async () => {
     try {
@@ -17,6 +21,11 @@ export default function CashierLayout() {
     } catch (err) {
       console.error('Logout failed:', err);
     }
+  };
+
+  const handleBackToPanel = () => {
+    if (isAdmin)   navigate('/admin/dashboard');
+    if (isManager) navigate('/admin/manager');
   };
 
   const activeStoreName = activeStore?.store_name || 'Assigned store';
@@ -59,31 +68,30 @@ export default function CashierLayout() {
             <UserCircle2 size={25} />
             <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
               <span>{user?.full_name || 'Employee'}</span>
-              {/* Role comes from live user object, not hardcoded */}
               <span style={{
                 fontSize: 10,
                 fontWeight: 600,
                 textTransform: 'uppercase',
-                color: hasRole('manager', 'admin')
-                  ? 'var(--color-success)'
-                  : 'var(--color-text-secondary)',
+                color: canGoBack
+                  ? 'var(--hero-teal-2)'
+                  : 'var(--muted)',
               }}>
                 {user?.role || 'cashier'}
               </span>
             </div>
           </div>
 
-          {/* Back to admin — only roles that have admin panel access */}
-          {hasRole('manager', 'admin') && (
+          {/* Back to panel — admin goes to /admin/dashboard, manager to /admin/manager */}
+          {canGoBack && (
             <button
               type="button"
               className="ghost-button"
-              onClick={() => navigate('/admin/dashboard')}
-              title="Back to admin panel"
+              onClick={handleBackToPanel}
+              title={isAdmin ? 'Back to admin panel' : 'Back to manager panel'}
               style={{ fontSize: 12 }}
             >
               <ShieldCheck size={14} />
-              Admin
+              {isAdmin ? 'Admin' : 'Manager'}
             </button>
           )}
         </div>

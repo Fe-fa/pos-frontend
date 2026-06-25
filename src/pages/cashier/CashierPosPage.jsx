@@ -2,6 +2,8 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderClock,
+  LayoutGrid,
+  List,
   Minus,
   Plus,
   Printer,
@@ -10,6 +12,7 @@ import {
   Trash2,
   Download,
 } from 'lucide-react';
+import ProductListRow from '../../components/card/ProductListRow';
 import {
   memo,
   useCallback,
@@ -32,6 +35,7 @@ import PaymentModal from '../../components/modals/PaymentModal';
 import DraftModal from '../../components/modals/DraftModal';
 import CustomerModal from '../../components/modals/CustomerModal';
 import ProductCard from '../../components/card/ProductCard';
+import { storeService } from '../../services/storeService';
 
 const SEARCH_DEBOUNCE_MS = 500;
 const PRODUCT_CACHE_TTL_MS = 60_000;
@@ -83,9 +87,9 @@ const getProductImage = (product) => {
 const getItemTotal = (item) =>
   Number(
     item?.total_amount ??
-      item?.line_total ??
-      item?.line_subtotal ??
-      Number(item?.quantity || 0) * Number(item?.unit_price || 0)
+    item?.line_total ??
+    item?.line_subtotal ??
+    Number(item?.quantity || 0) * Number(item?.unit_price || 0)
   );
 
 const isTypingElement = (target) => {
@@ -324,41 +328,37 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
   onAddProduct,
   currencyFormatter,
   getProductImageFn,
+  viewMode = 'grid',
 }) {
   const viewportRef = useRef(null);
   const { width, height } = useElementSize(viewportRef);
   const scrollTop = useScrollTop(viewportRef);
-
   useEffect(() => {
     if (!viewportRef.current) return;
     viewportRef.current.scrollTop = 0;
   }, [resetKey]);
 
-const virtualState = useMemo(() => {
-    const safeWidth = Math.max(width, 400); 
-    const columns = 4; 
+  // ✅ useMemo MUST come before any early return
+  const virtualState = useMemo(() => {
+    const safeWidth = Math.max(width, 400);
+    const columns = 4;
     const columnWidth = (safeWidth - PRODUCT_GRID_GAP * (columns - 1)) / columns;
-
     const totalRows = Math.ceil(products.length / columns);
     const viewportHeight = Math.max(height || 640, PRODUCT_CARD_ESTIMATED_HEIGHT);
-
     const startRow = Math.max(
       0,
       Math.floor(scrollTop / PRODUCT_CARD_ESTIMATED_HEIGHT) - PRODUCT_GRID_OVERSCAN_ROWS
     );
-
     const endRow = Math.min(
       totalRows,
       Math.ceil((scrollTop + viewportHeight) / PRODUCT_CARD_ESTIMATED_HEIGHT) +
-        PRODUCT_GRID_OVERSCAN_ROWS
+      PRODUCT_GRID_OVERSCAN_ROWS
     );
-
     const cells = [];
     for (let row = startRow; row < endRow; row += 1) {
       for (let col = 0; col < columns; col += 1) {
         const index = row * columns + col;
         if (index >= products.length) break;
-
         cells.push({
           index,
           item: products[index],
@@ -372,17 +372,47 @@ const virtualState = useMemo(() => {
         });
       }
     }
-
     const totalHeight = Math.max(
       totalRows * PRODUCT_CARD_ESTIMATED_HEIGHT - PRODUCT_GRID_GAP,
       0
     );
-
     return { cells, totalHeight };
   }, [products, width, height, scrollTop]);
 
+  if (viewMode === 'list') {
+    return (
+      <div
+        ref={viewportRef}
+        className="products-viewport"
+        style={{
+          overflowY: 'auto',
+          maxHeight: PRODUCT_VIEWPORT_MAX_HEIGHT,
+          minHeight: 360,
+        }}
+      >
+        {!productsLoading && !products.length ? (
+          <div className="card"><p>Empty.</p></div>
+        ) : null}
+        <div className="product-list">
+          {products.map((item, index) => (
+            <ProductListRow
+              key={item.product_id ?? index}
+              product={item}
+              currentStore={currentStore}
+              submitting={submitting}
+              onPayNow={onPayNow}
+              onAddProduct={onAddProduct}
+              currency={currencyFormatter}
+              getProductImage={getProductImageFn}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
-<div
+    <div
       ref={viewportRef}
       className="products-viewport"
       style={{
@@ -504,7 +534,24 @@ export default function CashierPosPage() {
     [stores, storeId]
   );
 
-  const printSettings = useMemo(() => mergeStoreSettings(currentStore), [currentStore]);
+  const [printSettings, setPrintSettings] = useState(() => mergeStoreSettings());
+  useEffect(() => {
+    if (!currentStore?.store_id) return;
+    let cancelled = false;
+
+    storeService.getSettings(currentStore.store_id)
+      .then((response) => {
+        if (cancelled) return;
+        const payload = response?.data?.data ?? response?.data ?? response ?? {};
+        setPrintSettings(mergeStoreSettings(payload));
+      })
+      .catch(() => {
+        if (!cancelled) setPrintSettings(mergeStoreSettings(currentStore));
+      });
+
+    return () => { cancelled = true; };
+  }, [currentStore?.store_id]);
+
 
   /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
@@ -573,6 +620,7 @@ export default function CashierPosPage() {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [isBalanceSettlement, setIsBalanceSettlement] = useState(false);
 
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
@@ -585,8 +633,14 @@ export default function CashierPosPage() {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [viewMode, setViewMode] = useState('grid');
+  const [categorySearch, setCategorySearch] = useState('');
+  const [categorySearchOpen, setCategorySearchOpen] = useState(false);
 
   const visibleCategories = categories;
+
+  const debouncedCategorySearch = useDebouncedValue(categorySearch.trim(), 400);
+
 
   const activeCategoryId = useMemo(() => {
     if (activeCategory === 'all') return null;
@@ -642,17 +696,19 @@ export default function CashierPosPage() {
       safeClearCart(key);
       return;
     }
-
     const snapshot = {
       v: 1,
       savedAt: Date.now(),
       storeId: String(storeId || ''),
       userId: String(user?.user_id || ''),
+
       billing: {
         billing_id: billing.billing_id || null,
         invnumber: billing.invnumber || null,
-        is_draft: true,
+        is_draft: billing.is_draft ?? true,   // ← preserve the actual status
+        status: billing.status || null,        // ← save status too for extra safety
         customer_id: billing.customer_id || null,
+
         notes: billing.notes || null,
         subtotal: billing.subtotal || 0,
         vat_amount: billing.vat_amount || 0,
@@ -663,12 +719,12 @@ export default function CashierPosPage() {
           product_id: it.product_id,
           product: it.product
             ? {
-                product_id: it.product.product_id,
-                product_name: it.product.product_name,
-                sku: it.product.sku,
-                price: it.product.price,
-                vat_rate: it.product.vat_rate,
-              }
+              product_id: it.product.product_id,
+              product_name: it.product.product_name,
+              sku: it.product.sku,
+              price: it.product.price,
+              vat_rate: it.product.vat_rate,
+            }
             : null,
           quantity: it.quantity,
           unit_price: it.unit_price,
@@ -731,7 +787,7 @@ export default function CashierPosPage() {
      ===================================================================== */
   const enqueueSync = useCallback((task) => {
     const next = syncQueueRef.current.then(task, task);
-    syncQueueRef.current = next.catch(() => {});
+    syncQueueRef.current = next.catch(() => { });
     return next;
   }, []);
 
@@ -763,7 +819,9 @@ export default function CashierPosPage() {
     setChapa5ClaimedQty(0);
     setShowPaymentModal(false);
     setShowCustomerModal(false);
+    setIsBalanceSettlement(false);
     safeClearCart(cartStorageKeyRef.current);
+    lastSyncedHeaderRef.current = { customerId: null, notes: null, billingId: null };
   }, []);
 
   const resetProductState = useCallback(() => {
@@ -874,6 +932,30 @@ export default function CashierPosPage() {
     },
     [storeId, buildCategoryCacheKey]
   );
+  useEffect(() => {
+    if (!storeId || !bootstrappedRef.current) return;
+
+    if (!debouncedCategorySearch) {
+      // restore page 1 from cache when cleared
+      loadCategoriesPage(1, { silent: true });
+      return;
+    }
+
+    setCategoriesLoading(true);
+    categoryService
+      .list({
+        store_id: Number(storeId),
+        search: debouncedCategorySearch,
+        per_page: 100, // fetch enough to show all matches
+      })
+      .then((response) => {
+        const items = extractList(response);
+        setCategories(items);
+        setCategoryPageInfo(emptyPageInfo()); // hide pagination while searching
+      })
+      .catch(() => { })
+      .finally(() => setCategoriesLoading(false));
+  }, [debouncedCategorySearch, storeId, loadCategoriesPage]);
 
   const loadStaticData = useCallback(async () => {
     if (!storeId) {
@@ -893,8 +975,7 @@ export default function CashierPosPage() {
     } catch (err) {
       console.error('POS catalog load failed:', err);
       setError(
-        `Failed to load catalog: ${
-          err?.response?.data?.message || err?.message || 'Network Error'
+        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'
         }`
       );
       return { categories: [], categoryPageInfo: emptyPageInfo() };
@@ -1038,29 +1119,29 @@ export default function CashierPosPage() {
   /* =====================================================================
    CUSTOMERS
    ===================================================================== */
-const loadCustomers = useCallback(
-  async ({ silent = false } = {}) => {
-    if (!storeId) {
-      setCustomers([]);
-      return;
-    }
-    if (!silent) setCustomersLoading(true);
-
-    try {
-      const response = await customerService.list({ store_id: Number(storeId) });
-      const items = extractList(response);
-      setCustomers(items);
-    } catch (err) {
-      if (!silent) {
-        setError(err?.response?.data?.message || err?.message || 'Failed to load customers.');
+  const loadCustomers = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!storeId) {
+        setCustomers([]);
+        return;
       }
-      setCustomers([]);
-    } finally {
-      if (!silent) setCustomersLoading(false);
-    }
-  },
-  [storeId]
-);
+      if (!silent) setCustomersLoading(true);
+
+      try {
+        const response = await customerService.list({ store_id: Number(storeId) });
+        const items = extractList(response);
+        setCustomers(items);
+      } catch (err) {
+        if (!silent) {
+          setError(err?.response?.data?.message || err?.message || 'Failed to load customers.');
+        }
+        setCustomers([]);
+      } finally {
+        if (!silent) setCustomersLoading(false);
+      }
+    },
+    [storeId]
+  );
 
   /* =====================================================================
      BILLING DETAIL
@@ -1091,7 +1172,7 @@ const loadCustomers = useCallback(
 
   loadStaticDataRef.current = loadStaticData;
   loadDraftsRef.current = loadDrafts;
-  loadCustomersRef.current = loadCustomers; 
+  loadCustomersRef.current = loadCustomers;
   loadBillingDetailRef.current = loadBillingDetail;
 
   /* =====================================================================
@@ -1134,7 +1215,7 @@ const loadCustomers = useCallback(
     };
   }, [selectedCustomerId, selectedCustomer]);
 
-useEffect(() => {
+  useEffect(() => {
     let cancelled = false;
     const run = async () => {
       if (!selectedCustomerId || !storeId) {
@@ -1190,7 +1271,7 @@ useEffect(() => {
     setError('');
     setSuccess('');
     setDrafts([]);
-    setCustomers([]); 
+    setCustomers([]);
     setSearch('');
     setDraftSearch('');
     setActiveCategory('all');
@@ -1199,100 +1280,109 @@ useEffect(() => {
     resetProductState();
     resetCategoryState();
 
-const bootstrap = async () => {
-  try {
-    setProductsLoading(true);
-    await loadStaticDataRef.current();
-    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-    const productsResponse = await productService.list({
-      
-      store_id: Number(storeId),
-      page: 1,
-      is_active: true,
-    });
-    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+    const bootstrap = async () => {
+      try {
+        setProductsLoading(true);
+        await loadStaticDataRef.current();
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+        const productsResponse = await productService.list({
 
-    productFiltersRef.current = {
-      storeId: String(storeId || ''),
-      activeCategoryId: null,
-      scopeKey: 'all',
-      search: '',
-    };
-
-    const meta = extractMeta(productsResponse);
-    const items = extractList(productsResponse);
-    const pageInfo = buildPageInfo(meta, items, 1);
-
-    const cacheKey = JSON.stringify({
-      storeId: String(storeId),
-      page: 1,
-      categoryScope: 'all',
-      categoryId: '',
-      search: '',
-    });
-
-    productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
-    setProducts(items);
-    setProductPageInfo(pageInfo);
-    setCurrentPage(1);
-
-    bootstrapProductsFetchedRef.current = true;
- lastProductFilterRef.current = JSON.stringify({
-  storeId: String(storeId || ''),
-  categoryScope: 'all',         // effectiveCategoryScopeKey when activeCategory === 'all'
-  search: '',                   // debouncedSearch.toLowerCase() when search is empty
-});
-
-    bootstrappedRef.current = true;
-    setCatalogReady(true);
-
-    // 3) Customers only after products have resolved.
-await loadCustomersRef.current({ silent: true });
-if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-
-    // 4) Drafts after the catalog is usable — sequential, not raced against products.
-    await loadDraftsRef.current({ silent: true });
-    if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-
-    // 5) Cart hydration runs last.
-    const key = cartStorageKey(storeId, user?.user_id);
-    cartStorageKeyRef.current = key;
-    const saved = safeLoadCart(key);
-
-    if (saved?.billing?.items?.length) {
-      if (saved.billing.billing_id) {
-        try {
-          await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
-        } catch {
-          const restored = recalcBillingTotals({
-            ...buildEmptyLocalBilling(),
-            ...saved.billing,
-            billing_id: null,
-            __local: true,
-          });
-          setBilling(restored);
-          setSelectedCustomerId(saved.selectedCustomerId || '');
-          setNotes(saved.notes || '');
-        }
-      } else {
-        const restored = recalcBillingTotals({
-          ...buildEmptyLocalBilling(),
-          ...saved.billing,
-          __local: true,
+          store_id: Number(storeId),
+          page: 1,
+          is_active: true,
         });
-        setBilling(restored);
-        setSelectedCustomerId(saved.selectedCustomerId || '');
-        setNotes(saved.notes || '');
-      }
-    }
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
 
-    hydratedFromStorageRef.current = true;
-  } catch (err) {
-    if (!cancelled) console.error('POS init failed:', err);
-  } finally {
-    if (!cancelled) setProductsLoading(false);
-  }
-};
+        productFiltersRef.current = {
+          storeId: String(storeId || ''),
+          activeCategoryId: null,
+          scopeKey: 'all',
+          search: '',
+        };
+
+        const meta = extractMeta(productsResponse);
+        const items = extractList(productsResponse);
+        const pageInfo = buildPageInfo(meta, items, 1);
+
+        const cacheKey = JSON.stringify({
+          storeId: String(storeId),
+          page: 1,
+          categoryScope: 'all',
+          categoryId: '',
+          search: '',
+        });
+
+        productCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
+        setProducts(items);
+        setProductPageInfo(pageInfo);
+        setCurrentPage(1);
+
+        bootstrapProductsFetchedRef.current = true;
+        lastProductFilterRef.current = JSON.stringify({
+          storeId: String(storeId || ''),
+          categoryScope: 'all',         // effectiveCategoryScopeKey when activeCategory === 'all'
+          search: '',                   // debouncedSearch.toLowerCase() when search is empty
+        });
+
+        bootstrappedRef.current = true;
+        setCatalogReady(true);
+
+        // 3) Set storage key
+        const key = cartStorageKey(storeId, user?.user_id);
+        cartStorageKeyRef.current = key;
+
+        // 4) Read saved cart into memory first
+        const saved = safeLoadCart(key);
+
+        // ✅ MOVE HERE — we've already read the cart so saving won't race against reading.
+        // Any item additions while customers/drafts load will now be persisted correctly.
+        hydratedFromStorageRef.current = true;
+
+        // 5) Customers
+        await loadCustomersRef.current({ silent: true });
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+        // 6) Drafts
+        await loadDraftsRef.current({ silent: true });
+        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+
+        // 7) Restore cart from localStorage
+        if (saved?.billing?.items?.length) {
+          if (
+            saved.billing.billing_id &&
+            saved.billing.is_draft !== false &&
+            saved.billing.status !== 'paid'
+          ) {
+            try {
+              await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
+            } catch {
+              const restored = recalcBillingTotals({
+                ...buildEmptyLocalBilling(),
+                ...saved.billing,
+                billing_id: null,
+                __local: true,
+              });
+              setBilling(restored);
+              setSelectedCustomerId(saved.selectedCustomerId || '');
+              setNotes(saved.notes || '');
+            }
+          } else {
+            const restored = recalcBillingTotals({
+              ...buildEmptyLocalBilling(),
+              ...saved.billing,
+              __local: true,
+            });
+            setBilling(restored);
+            setSelectedCustomerId(saved.selectedCustomerId || '');
+            setNotes(saved.notes || '');
+          }
+        }
+      } catch (err) {
+        if (!cancelled) console.error('POS init failed:', err);
+      } finally {
+        if (!cancelled) setProductsLoading(false);
+      }
+    };
 
     bootstrap();
 
@@ -1301,53 +1391,53 @@ if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
     };
   }, [storeId, user?.user_id, resetSale, resetProductState, resetCategoryState]);
 
-/* ----- PRODUCTS RELOAD --------------------------------------------- */
-useEffect(() => {
-  if (!storeId || !bootstrappedRef.current || !catalogReady) return;
+  /* ----- PRODUCTS RELOAD --------------------------------------------- */
+  useEffect(() => {
+    if (!storeId || !bootstrappedRef.current || !catalogReady) return;
 
-  // Bootstrap already loaded page 1 — skip this render, clear the flag
-  if (bootstrapProductsFetchedRef.current) {
-    bootstrapProductsFetchedRef.current = false;
-    lastProductFilterRef.current = currentFilterSignature; // ✅ sync signature NOW
-    return;
-  }
-
-  const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
-
-  if (!filtersChanged && currentPage === productPageInfo.currentPage) {
-    return; // ✅ nothing actually changed, don't re-fetch
-  }
-
-  if (filtersChanged) {
-    prefetchedKeysRef.current.clear();
-    if (currentPage !== 1) {
-      setCurrentPage(1);
-      lastProductFilterRef.current = currentFilterSignature;
+    // Bootstrap already loaded page 1 — skip this render, clear the flag
+    if (bootstrapProductsFetchedRef.current) {
+      bootstrapProductsFetchedRef.current = false;
+      lastProductFilterRef.current = currentFilterSignature; // ✅ sync signature NOW
       return;
     }
-    lastProductFilterRef.current = currentFilterSignature;
-    void loadProducts(1);
-    return;
-  }
 
-  void loadProducts(currentPage);
-}, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady, productPageInfo.currentPage]);
+    const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
- /* ----- PRODUCT PREFETCH -------------------------------------------- */
-useEffect(() => {
-  if (!bootstrappedRef.current || !catalogReady) return;
-  if (productsLoading) return;
-  if (!productPageInfo.hasNextPage) return;
-  if (bootstrapProductsFetchedRef.current) return; // ✅ ADD THIS LINE
+    if (!filtersChanged && currentPage === productPageInfo.currentPage) {
+      return; // ✅ nothing actually changed, don't re-fetch
+    }
 
-  void prefetchNextPage(productPageInfo.currentPage + 1);
-}, [
-  productPageInfo.currentPage,
-  productPageInfo.hasNextPage,
-  prefetchNextPage,
-  productsLoading,
-  catalogReady,
-]);
+    if (filtersChanged) {
+      prefetchedKeysRef.current.clear();
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+        lastProductFilterRef.current = currentFilterSignature;
+        return;
+      }
+      lastProductFilterRef.current = currentFilterSignature;
+      void loadProducts(1);
+      return;
+    }
+
+    void loadProducts(currentPage);
+  }, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady, productPageInfo.currentPage]);
+
+  /* ----- PRODUCT PREFETCH -------------------------------------------- */
+  useEffect(() => {
+    if (!bootstrappedRef.current || !catalogReady) return;
+    if (productsLoading) return;
+    if (!productPageInfo.hasNextPage) return;
+    if (bootstrapProductsFetchedRef.current) return; // ✅ ADD THIS LINE
+
+    void prefetchNextPage(productPageInfo.currentPage + 1);
+  }, [
+    productPageInfo.currentPage,
+    productPageInfo.hasNextPage,
+    prefetchNextPage,
+    productsLoading,
+    catalogReady,
+  ]);
 
   /* =====================================================================
      BILLING MUTATIONS
@@ -1559,7 +1649,7 @@ useEffect(() => {
     if (!current?.items?.length) return null;
     if (current.billing_id) return current;
 
-    await syncQueueRef.current.catch(() => {});
+    await syncQueueRef.current.catch(() => { });
 
     const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
@@ -1570,30 +1660,46 @@ useEffect(() => {
     const newId = created.billing_id;
 
     const snapshot = [...(current.items || [])];
-    for (const it of snapshot) {
-      try {
-        await billingService.addItem(newId, {
+    await Promise.allSettled(
+      snapshot.map((it) =>
+        billingService.addItem(newId, {
           product_id: it.product_id,
           quantity: it.quantity,
           unit_price: it.unit_price,
-        });
-      } catch (err) {
-        console.error('Failed to sync line on promote:', err);
-      }
-    }
+        })
+      )
+    );
 
     const detail = await loadBillingDetail(newId, { silent: true });
     return detail || created;
   }, [storeId, selectedCustomerId, notes, loadBillingDetail]);
 
+  const lastSyncedHeaderRef = useRef({ customerId: null, notes: null, billingId: null });
+
   const persistDraftHeader = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.billing_id) return null;
+
+    // Skip the update call if nothing on the header actually changed
+    const last = lastSyncedHeaderRef.current;
+    const headerUnchanged =
+      last.billingId === current.billing_id &&
+      last.customerId === (selectedCustomerId || null) &&
+      last.notes === (notes || null);
+
+    if (headerUnchanged) {
+      return current; // nothing to sync, return immediately
+    }
 
     await billingService.update(current.billing_id, {
       customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
       notes: notes || null,
     });
+    lastSyncedHeaderRef.current = {
+      billingId: current.billing_id,
+      customerId: selectedCustomerId || null,
+      notes: notes || null,
+    };
 
     const updatedBilling = await loadBillingDetail(current.billing_id, { silent: true });
     mergeDraftPreview(updatedBilling);
@@ -1640,6 +1746,12 @@ useEffect(() => {
       if (!current.billing_id) await promoteLocalCartToServerDraft();
       else await persistDraftHeader();
       setShowPaymentModal(true);
+      setSubmitting(true);
+      if (!current.billing_id) {
+        await promoteLocalCartToServerDraft();
+      } else {
+        await persistDraftHeader();
+      }
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Unable to open payment.');
     } finally {
@@ -1650,7 +1762,11 @@ useEffect(() => {
   const handleCharge = useCallback(
     async (paymentDetails) => {
       const current = billingRef.current;
-      if (!current?.items?.length) return;
+
+      // Allow balance-settlement path (billing exists on server, no new items in session)
+      // Block only when there's truly nothing to charge against
+      if (!current?.billing_id && !current?.items?.length) return;
+
       if (current.status === 'paid') {
         setShowPaymentModal(false);
         return;
@@ -1661,8 +1777,16 @@ useEffect(() => {
 
       try {
         let target = current;
-        if (!current.billing_id) target = await promoteLocalCartToServerDraft();
-        else target = (await persistDraftHeader()) || current;
+
+        if (!current.billing_id) {
+          // Local cart with items — promote to server draft first
+          target = await promoteLocalCartToServerDraft();
+        } else if (current.items?.length) {
+          // Server billing with items — persist any header changes
+          target = (await persistDraftHeader()) || current;
+        }
+        // else: balance-only settlement — billing_id already exists,
+        // no items to sync, use current as-is
 
         await billingService.charge(target.billing_id, {
           payment_method: paymentDetails.paymentMethod,
@@ -1678,9 +1802,16 @@ useEffect(() => {
         const paidResponse = await billingService.show(target.billing_id);
         const paidBilling = paidResponse?.data || paidResponse;
         const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
-        openBillingPrint(paidBilling, currentStore, printMode, printSettings);
+
+        openBillingPrint(
+          { ...paidBilling, store: paidBilling.store || currentStore },
+          currentStore,
+          printMode,
+          printSettings
+        );
 
         removeDraftPreview(target.billing_id);
+        safeClearCart(cartStorageKeyRef.current);
         resetSale();
         setPointsToRedeem(0);
         setShowPaymentModal(false);
@@ -1746,6 +1877,51 @@ useEffect(() => {
     },
     [deleteBillingRecord, removeDraftPreview, resetSale]
   );
+  const handleSettleBalance = useCallback(async () => {
+    if (!selectedCustomerId) return;
+
+    setError('');
+    setSubmitting(true);
+
+    try {
+      const response = await billingService.list({
+        store_id: Number(storeId),
+        customer_id: Number(selectedCustomerId),
+        status: 'partial',
+        is_draft: false,
+        per_page: 50,
+      });
+
+      const billings = extractList(response);
+
+      if (!billings.length) {
+        setError('No outstanding balance found for this customer.');
+        return;
+      }
+
+      const target = billings[billings.length - 1];
+      const detail = await billingService.show(target.billing_id);
+      const fetched = detail?.data || detail;
+      const balanceDue = Number(fetched.balance_due || 0);
+
+      setBilling({
+        ...fetched,
+        items: [],
+        total: balanceDue,
+        subtotal: balanceDue,
+        vat_amount: 0,
+        paid_amount: 0,
+        balance_due: balanceDue,
+      });
+
+      setIsBalanceSettlement(true);
+      setShowPaymentModal(true);
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || 'Unable to load outstanding balance.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [selectedCustomerId, storeId]);
 
   const handleCustomerSelect = useCallback((customerId, customerObject = null) => {
     setSelectedCustomerId(customerId);
@@ -1947,10 +2123,10 @@ useEffect(() => {
     () =>
       Number(
         billing?.customer?.current_balance ??
-          selectedCustomer?.current_balance ??
-          selectedCustomer?.balance ??
-          selectedCustomer?.opening_balance ??
-          0
+        selectedCustomer?.current_balance ??
+        selectedCustomer?.balance ??
+        selectedCustomer?.opening_balance ??
+        0
       ),
     [billing?.customer, selectedCustomer]
   );
@@ -2041,23 +2217,56 @@ useEffect(() => {
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search products by name or SKU"
               />
+              {search && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => setSearch('')}
+                  title="Clear search"
+                  style={{ width: 28, height: 28, border: 'none', background: 'transparent', color: 'var(--muted)', flexShrink: 0 }}
+                >
+                  ×
+                </button>
+              )}
             </div>
+            {/* ← ADD THIS */}
+            <div className="view-toggle">
+              <button
+                type="button"
+                className={`icon-button ${viewMode === 'grid' ? 'active' : ''}`}
+                onClick={() => setViewMode('grid')}
+                title="Grid view"
+              >
+                <LayoutGrid size={16} />
+              </button>
+              <button
+                type="button"
+                className={`icon-button ${viewMode === 'list' ? 'active' : ''}`}
+                onClick={() => setViewMode('list')}
+                title="List view"
+              >
+                <List size={16} />
+              </button>
+            </div>
+
 
             <div
               className="chips-row"
               style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
             >
-              <button
-                type="button"
-                className="chip chip-nav"
-                onClick={goToPrevCategoryPage}
-                disabled={!canPrevCategory || categoriesLoading}
-                aria-label="Previous categories"
-                title="Previous categories"
-                style={{ padding: '6px 8px' }}
-              >
-                <ChevronLeft size={14} />
-              </button>
+              {!categorySearch && (
+                <button
+                  type="button"
+                  className="chip chip-nav"
+                  onClick={goToPrevCategoryPage}
+                  disabled={!canPrevCategory || categoriesLoading}
+                  aria-label="Previous categories"
+                  title="Previous categories"
+                  style={{ padding: '6px 8px' }}
+                >
+                  <ChevronLeft size={14} />
+                </button>
+              )}
 
               <button
                 type="button"
@@ -2083,18 +2292,67 @@ useEffect(() => {
                 );
               })}
 
-              <button
-                type="button"
-                className="chip chip-nav"
-                onClick={goToNextCategoryPage}
-                disabled={!canNextCategory || categoriesLoading}
-                aria-label="Next categories"
-                title="Next categories"
-                style={{ padding: '6px 8px' }}
-              >
-                <ChevronRight size={14} />
-              </button>
-
+              {!categorySearch && (
+                <button
+                  type="button"
+                  className="chip chip-nav"
+                  onClick={goToNextCategoryPage}
+                  disabled={!canNextCategory || categoriesLoading}
+                  aria-label="Next categories"
+                  title="Next categories"
+                  style={{ padding: '6px 8px' }}
+                >
+                  <ChevronRight size={14} />
+                </button>
+              )}
+              <div className="category-search-wrap">
+                <button
+                  type="button"
+                  className={`icon-button category-search-toggle ${categorySearch ? 'active' : ''}`}
+                  onClick={() => {
+                    if (categorySearch) {
+                      setCategorySearch('');
+                    } else {
+                      // focus the hidden input after state update
+                      window.requestAnimationFrame(() => {
+                        document.getElementById('category-search-input')?.focus();
+                      });
+                    }
+                    setCategorySearchOpen((prev) => !prev);
+                  }}
+                  title="Search categories"
+                >
+                  <Search size={15} />
+                </button>
+                {categorySearchOpen && (
+                  <div className="category-search-popout">
+                    <input
+                      id="category-search-input"
+                      type="text"
+                      className="category-search-input"
+                      placeholder="Filter categories…"
+                      value={categorySearch}
+                      onChange={(e) => setCategorySearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          setCategorySearch('');
+                          setCategorySearchOpen(false);
+                        }
+                      }}
+                    />
+                    {categorySearch && (
+                      <button
+                        type="button"
+                        className="category-search-clear"
+                        onClick={() => setCategorySearch('')}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* 
               {categoryPageInfo.total > 0 && (
                 <span
                   className="muted"
@@ -2106,22 +2364,22 @@ useEffect(() => {
                     {categoryPageInfo.total}
                   </span>
                 </span>
-              )}
+              )} */}
             </div>
           </div>
 
-{catalogLoading ? (
-  <div className="page-loader">
-    <div className="pos-spinner-wrap">
-      <div className="spinner" />
-      <span className="pos-spinner-label">Loading...</span>
-    </div>
-  </div>
-) : (
+          {catalogLoading ? (
+            <div className="page-loader">
+              <div className="pos-spinner-wrap">
+                <div className="spinner" />
+                <span className="pos-spinner-label">Loading...</span>
+              </div>
+            </div>
+          ) : (
             <>
               {error ? <div className="form-error">{error}</div> : null}
               {success ? <div className="form-success">{success}</div> : null}
-             {/* {productsLoading && products.length ? (
+              {/* {productsLoading && products.length ? (
   <div className="inline-note-spinner">
     <div className="spinner spinner--sm" />
   </div>
@@ -2137,6 +2395,7 @@ useEffect(() => {
                 onAddProduct={handleAddProduct}
                 currencyFormatter={currency}
                 getProductImageFn={getProductImage}
+                viewMode={viewMode}
               />
 
               {products.length > 0 ? (
@@ -2188,7 +2447,7 @@ useEffect(() => {
                 <p className="invoice-subtext">
                   {billing
                     ? billing.invnumber ||
-                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                    (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
                     : 'No active billing yet'}
                 </p>
               </div>
@@ -2277,7 +2536,7 @@ useEffect(() => {
                 {billingLoading ? <p>Refreshing billing...</p> : null}
               </div>
 
-                            <div
+              <div
                 className="header-action-icons-row"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
               >
@@ -2293,14 +2552,36 @@ useEffect(() => {
                     <FolderClock size={16} />
                   </button>
                 )}
-
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() =>
-                    billing && openBillingPrint(billing, currentStore, 'invoice', printSettings)
-                  }
-                  disabled={!billing}
+                  onClick={async () => {
+                    if (!billing) return;
+                    setSubmitting(true);
+                    setError('');
+                    try {
+                      let billToPrint = billing;
+                      if (!billing.billing_id) {
+                        billToPrint = await promoteLocalCartToServerDraft();
+                      } else {
+                        billToPrint = (await persistDraftHeader()) || billing;
+                      }
+
+                      if (billToPrint) {
+                        openBillingPrint(
+                          { ...billToPrint, store: billToPrint.store || currentStore },
+                          currentStore,
+                          'invoice',
+                          printSettings
+                        );
+                      }
+                    } catch (err) {
+                      setError(err?.response?.data?.message || err?.message || 'Unable to print.');
+                    } finally {
+                      setSubmitting(false);
+                    }
+                  }}
+                  disabled={!billing || submitting}
                   title="Print"
                   style={{ padding: '6px', minWidth: 'auto' }}
                 >
@@ -2310,7 +2591,9 @@ useEffect(() => {
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() => billing && downloadBillingDocument(billing, 'invoice')}
+                  onClick={() =>
+                    billing && downloadBillingDocument({ ...billing, store: currentStore }, 'invoice')
+                  }
                   disabled={!billing}
                   title="Download"
                   style={{ padding: '6px', minWidth: 'auto' }}
@@ -2388,15 +2671,36 @@ useEffect(() => {
             </div>
 
             <div className="billing-bottom-actions">
-              <button
-                type="button"
-                className="primary-button"
-                disabled={!billing?.items?.length || submitting}
-                onClick={handleProceedToPayment}
-                style={{ width: '100%', justifyContent: 'center' }}
-              >
-                Proceed to Payment
-              </button>
+              {billing?.items?.length ? (
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={submitting}
+                  onClick={handleProceedToPayment}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Proceed to Payment
+                </button>
+              ) : selectedCustomerId && Number(selectedCustomer?.current_balance ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={submitting}
+                  onClick={handleSettleBalance}
+                  style={{ width: '100%', justifyContent: 'center', background: 'var(--hero-teal-1)' }}
+                >
+                  Settle Balance ({currency(selectedCustomer.current_balance, currentStore?.currency)})
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Proceed to Payment
+                </button>
+              )}
             </div>
           </div>
         </aside>
@@ -2411,7 +2715,10 @@ useEffect(() => {
         customerCurrentBalance={customerCurrentBalance}
         submitting={submitting}
         currency={currency}
-        onClose={() => setShowPaymentModal(false)}
+        onClose={() => {
+          setShowPaymentModal(false);
+          setIsBalanceSettlement(false);
+        }}
         onCharge={handleCharge}
         loyaltyPoints={loyaltyRule?.loyalty_points ?? 0}
         loyaltyPointValue={loyaltyRule?.active_rule?.point_value ?? 1}
@@ -2420,6 +2727,7 @@ useEffect(() => {
         chapa5Preview={chapa5Preview}
         onClaimChapa5Reward={handleClaimChapa5Reward}
         loyaltyMinPoints={loyaltyRule?.active_rule?.min_points ?? 0}
+        isBalanceSettlement={isBalanceSettlement}
       />
 
       <DraftModal
@@ -2445,8 +2753,8 @@ useEffect(() => {
         currentStore={currentStore}
         currency={currency}
         onSelectCustomer={handleCustomerSelect}
-         customers={customers}              // 👈 add this line
-       customersLoading={customersLoading}
+        customers={customers}
+        customersLoading={customersLoading}
       />
     </>
   );

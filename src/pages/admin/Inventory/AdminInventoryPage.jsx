@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   useMutation,
   useQuery,
@@ -53,9 +53,6 @@ function AdminInventoryPageContent() {
   }, [storeId, ui.resetForStoreChange]);
 
   // ── inventory list query ──────────────────────────────────────────────────
-  // pageSize starts as null. On the first request we omit per_page so the
-  // backend applies its own default. The select callback returns meta.per_page
-  // so we can seed ui.pageSize once.
   const inventoryQuery = useQuery({
     queryKey: ['inventory', storeId, ui.inventoryPage, ui.pageSize, debouncedSearch],
     enabled: Boolean(storeId),
@@ -65,7 +62,6 @@ function AdminInventoryPageContent() {
         {
           store_id: storeId,
           page: ui.inventoryPage,
-          // Omit per_page on first load (null) so backend default takes effect.
           ...(ui.pageSize !== null ? { per_page: ui.pageSize } : {}),
           ...(debouncedSearch ? { search: debouncedSearch } : {}),
         },
@@ -125,8 +121,30 @@ function AdminInventoryPageContent() {
 
   const products = productsQuery.data || [];
 
+  // ── summary stats ─────────────────────────────────────────────────────────
+  const totalSkus = inventoryPagination.total || 0;
+
+  const totalValue = useMemo(
+    () =>
+      inventoryRows.reduce((sum, row) => {
+        const price = Number(row.product?.price || 0);
+        const qty = Number(row.quantity || 0);
+        return sum + price * qty;
+      }, 0),
+    [inventoryRows]
+  );
+
   const lowStockCount = useMemo(
-    () => inventoryRows.filter((row) => getInventoryStatus(row).tone === 'low').length,
+    () =>
+      inventoryRows.filter((row) => {
+        const s = getInventoryStatus(row);
+        return s.tone === 'low' || s.tone === 'critical';
+      }).length,
+    [inventoryRows]
+  );
+
+  const deadStockCount = useMemo(
+    () => inventoryRows.filter((row) => Number(row.quantity || 0) === 0).length,
     [inventoryRows]
   );
 
@@ -157,7 +175,6 @@ function AdminInventoryPageContent() {
       ui.setInventoryPage(1);
       ui.setHistoryPage(1);
 
-      // Invalidate both lists in parallel — no need to await sequentially.
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['inventory', storeId] }),
         queryClient.invalidateQueries({ queryKey: ['inventory-history', storeId] }),
@@ -171,7 +188,6 @@ function AdminInventoryPageContent() {
   const deleteMutation = useMutation({
     mutationFn: (inventoryId) => inventoryService.remove(inventoryId),
     onSuccess: async () => {
-      // If we deleted the last row on a non-first page, step back one page.
       const nextPage =
         inventoryRows.length === 1 && inventoryPagination.current_page > 1
           ? inventoryPagination.current_page - 1
@@ -280,13 +296,49 @@ function AdminInventoryPageContent() {
     [deleteMutation]
   );
 
+  // ── export handler ────────────────────────────────────────────────────────
+  const handleExport = useCallback(
+    (format) => {
+      // Build a simple CSV from the current page rows
+      if (format === 'csv') {
+        const headers = ['Product', 'SKU', 'Category', 'Batch No', 'Quantity', 'Reorder Level', 'Status'];
+        const csvRows = inventoryRows.map((row) => {
+          const status = getInventoryStatus(row);
+          return [
+            row.product?.product_name || '',
+            row.product?.sku || '',
+            row.product?.category?.category_name || '',
+            row.batch_no || '',
+            row.quantity,
+            row.reorder_level || 0,
+            status.label,
+          ].join(',');
+        });
+        const csv = [headers.join(','), ...csvRows].join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `inventory-${storeId}-${Date.now()}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } else {
+        window.alert('PDF export requires a server-side endpoint. CSV is available.');
+      }
+    },
+    [inventoryRows, storeId]
+  );
+
   // ── render ────────────────────────────────────────────────────────────────
   return (
     <>
       <section className="inventory-page stack-lg">
         <InventoryHeaderToolbar
           total={inventoryPagination.total}
+          totalSkus={totalSkus}
+          totalValue={totalValue}
           lowStockCount={lowStockCount}
+          deadStockCount={deadStockCount}
           isRefreshing={inventoryQuery.isFetching && inventoryRows.length > 0}
           storeId={storeId}
           canManage={canManage}
@@ -296,6 +348,7 @@ function AdminInventoryPageContent() {
           pageSize={ui.pageSize}
           onPageSizeChange={handlePageSizeChange}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
+          onExport={handleExport}
         />
 
         {pageError && !ui.showModal ? <p className="form-error">{pageError}</p> : null}

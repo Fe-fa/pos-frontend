@@ -1,22 +1,33 @@
 import api from '../lib/api';
 
 export const userService = {
-  list(params = {}) {
-    return api.get('/users', { params }).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/users', { params });
+    return response.data;
   },
-  show(userId) {
-    return api.get(`/users/${userId}`).then((res) => res.data);
+
+  async show(userId) {
+    const response = await api.get(`/users/${userId}`);
+    return response.data;
   },
-  create(payload) {
-    return api.post('/users', payload).then((res) => res.data);
+
+  async create(payload) {
+    const response = await api.post('/users', payload);
+    return response.data;
   },
-  update(userId, payload) {
-    return api.put(`/users/${userId}`, payload).then((res) => res.data);
+
+  async update(userId, payload) {
+    const response = await api.put(`/users/${userId}`, payload);
+    return response.data;
   },
-  syncStores(userId, storeIds = []) {
-    return api.post(`/users/${userId}/stores`, { store_ids: storeIds }).then((res) => res.data);
+
+  async syncStores(userId, storeIds = []) {
+    const response = await api.post(`/users/${userId}/stores`, { store_ids: storeIds });
+    return response.data;
   },
-  remove(userId) {
-    return api.delete(`/users/${userId}`).then((res) => res.data);
+
+  async remove(userId) {
+    const response = await api.delete(`/users/${userId}`);
+    return response.data;
   },
 };

@@ -4,41 +4,44 @@ const isFormData = (payload) =>
   typeof FormData !== 'undefined' && payload instanceof FormData;
 
 export const productService = {
-  list(params = {}) {
-    return api.get('/products', { params }).then((res) => res.data);
+  async list(params = {}) {
+    const response = await api.get('/products', { params });
+    return response.data;
   },
 
-  show(productId) {
-    return api.get(`/products/${productId}`).then((res) => res.data);
+  async show(productId) {
+    const response = await api.get(`/products/${productId}`);
+    return response.data;
   },
 
-  create(payload) {
+  async create(payload) {
     if (isFormData(payload)) {
-      return api.post('/products', payload, {
-        headers: {
-          Accept: 'application/json',
-        },
-      }).then((res) => res.data);
+      const response = await api.post('/products', payload, {
+        headers: { Accept: 'application/json' },
+      });
+      return response.data;
     }
 
-    return api.post('/products', payload).then((res) => res.data);
+    const response = await api.post('/products', payload);
+    return response.data;
   },
 
-  update(productId, payload) {
+  async update(productId, payload) {
     if (isFormData(payload)) {
       payload.append('_method', 'PUT');
 
-      return api.post(`/products/${productId}`, payload, {
-        headers: {
-          Accept: 'application/json',
-        },
-      }).then((res) => res.data);
+      const response = await api.post(`/products/${productId}`, payload, {
+        headers: { Accept: 'application/json' },
+      });
+      return response.data;
     }
 
-    return api.put(`/products/${productId}`, payload).then((res) => res.data);
+    const response = await api.put(`/products/${productId}`, payload);
+    return response.data;
   },
 
-  remove(productId) {
-    return api.delete(`/products/${productId}`).then((res) => res.data);
+  async remove(productId) {
+    const response = await api.delete(`/products/${productId}`);
+    return response.data;
   },
 };

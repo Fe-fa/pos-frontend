@@ -1,22 +1,33 @@
 import api from '../lib/api';
 
 export const authService = {
-  login(payload) {
-    return api.post('/auth/login', payload).then((res) => res.data);
+  async login(payload) {
+    const response = await api.post('/auth/login', payload);
+    return response.data;
   },
-  register(payload) {
-    return api.post('/auth/register', payload).then((res) => res.data);
+
+  async register(payload) {
+    const response = await api.post('/auth/register', payload);
+    return response.data;
   },
-  me() {
-    return api.get('/auth/me').then((res) => res.data);
+
+  async me() {
+    const response = await api.get('/auth/me');
+    return response.data;
   },
-  logout() {
-    return api.post('/auth/logout').then((res) => res.data);
+
+  async logout() {
+    const response = await api.post('/auth/logout');
+    return response.data;
   },
-  forgotPassword(payload) {
-    return api.post('/auth/forgot-password', payload).then((res) => res.data);
+
+  async forgotPassword(payload) {
+    const response = await api.post('/auth/forgot-password', payload);
+    return response.data;
   },
-  resetPassword(payload) {
-    return api.post('/auth/reset-password', payload).then((res) => res.data);
+
+  async resetPassword(payload) {
+    const response = await api.post('/auth/reset-password', payload);
+    return response.data;
   },
 };

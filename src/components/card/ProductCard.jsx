@@ -22,6 +22,12 @@ export default function ProductCard({
           backgroundRepeat: 'no-repeat',
         }}
       >
+        {product.description ? (
+          <div className="product-card-description-hover">
+            {product.description}
+          </div>
+        ) : null}
+
         <div className="product-card-actions">
           <button
             type="button"
