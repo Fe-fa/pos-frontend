@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   useMutation,
   useQuery,
@@ -45,9 +45,11 @@ function AdminInventoryPageContent() {
   const queryClient = useQueryClient();
   const ui = useInventoryAdminUI();
 
+  // Tracks rows queued for sequential bulk restock/adjust
+  const bulkQueueRef = useRef({ rows: [], mode: null, index: 0 });
+
   const debouncedSearch = useDebouncedValue(ui.search, 300);
 
-  // Reset filters/modal/form only when the store changes.
   useEffect(() => {
     ui.resetForStoreChange();
   }, [storeId, ui.resetForStoreChange]);
@@ -70,7 +72,6 @@ function AdminInventoryPageContent() {
     select: (response) => toPaginatedResult(response, ui.pageSize ?? undefined),
   });
 
-  // Seed pageSize from the first successful response — runs once.
   useEffect(() => {
     if (ui.pageSize === null && inventoryQuery.data?.perPage) {
       ui.setPageSize(inventoryQuery.data.perPage);
@@ -95,14 +96,13 @@ function AdminInventoryPageContent() {
     select: (response) => toPaginatedResult(response, ui.historyPageSize ?? undefined),
   });
 
-  // Seed historyPageSize from the first successful history response.
   useEffect(() => {
     if (ui.historyPageSize === null && historyQuery.data?.perPage) {
       ui.setHistoryPageSize(historyQuery.data.perPage);
     }
   }, [ui.historyPageSize, historyQuery.data?.perPage, ui.setHistoryPageSize]);
 
-  // ── products dropdown — only fetched while the modal is open ─────────────
+  // ── products dropdown ─────────────────────────────────────────────────────
   const productsQuery = useQuery({
     queryKey: ['products', storeId, 'inventory-form'],
     enabled: Boolean(storeId && ui.showModal),
@@ -115,13 +115,10 @@ function AdminInventoryPageContent() {
   // ── derived values ────────────────────────────────────────────────────────
   const inventoryRows = inventoryQuery.data?.rows || [];
   const inventoryPagination = inventoryQuery.data?.pagination || { ...EMPTY_META };
-
   const historyRows = historyQuery.data?.rows || [];
   const historyPagination = historyQuery.data?.pagination || { ...EMPTY_META };
-
   const products = productsQuery.data || [];
 
-  // ── summary stats ─────────────────────────────────────────────────────────
   const totalSkus = inventoryPagination.total || 0;
 
   const totalValue = useMemo(
@@ -165,20 +162,33 @@ function AdminInventoryPageContent() {
 
   // ── mutations ─────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
-    mutationFn: async ({ inventoryId, payload }) =>
-      inventoryId
-        ? inventoryService.update(inventoryId, payload)
-        : inventoryService.create(payload),
+    mutationFn: async ({ inventoryId, payload, mode }) => {
+      if (!inventoryId)        return inventoryService.create(payload);
+      if (mode === 'adjust')   return inventoryService.adjust(inventoryId, payload);
+      return inventoryService.update(inventoryId, payload); // 'restock' + 'edit'
+    },
     onSuccess: async () => {
-      ui.setShowModal(false);
-      ui.resetForm();
-      ui.setInventoryPage(1);
-      ui.setHistoryPage(1);
-
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['inventory', storeId] }),
         queryClient.invalidateQueries({ queryKey: ['inventory-history', storeId] }),
       ]);
+
+      // Advance bulk queue if one is active
+      const queue = bulkQueueRef.current;
+      const nextIndex = queue.index + 1;
+
+      if (queue.rows.length > 0 && nextIndex < queue.rows.length) {
+        bulkQueueRef.current = { ...queue, index: nextIndex };
+        ui.openEditModal(queue.rows[nextIndex], queue.mode);
+      } else {
+        // Queue done or single-item save — close and clean up
+        bulkQueueRef.current = { rows: [], mode: null, index: 0 };
+        ui.setShowModal(false);
+        ui.resetForm();
+        ui.setInventoryPage(1);
+        ui.setHistoryPage(1);
+        ui.clearSelection();
+      }
     },
     onError: (err) => {
       ui.setFormError(getErrorMessage(err, 'Unable to save inventory.'));
@@ -235,8 +245,7 @@ function AdminInventoryPageContent() {
   );
 
   const handlePreviousInventoryPage = useCallback(
-    () =>
-      ui.setInventoryPage(Math.max((inventoryPagination.current_page || 1) - 1, 1)),
+    () => ui.setInventoryPage(Math.max((inventoryPagination.current_page || 1) - 1, 1)),
     [ui.setInventoryPage, inventoryPagination.current_page]
   );
 
@@ -252,8 +261,7 @@ function AdminInventoryPageContent() {
   );
 
   const handlePreviousHistoryPage = useCallback(
-    () =>
-      ui.setHistoryPage(Math.max((historyPagination.current_page || 1) - 1, 1)),
+    () => ui.setHistoryPage(Math.max((historyPagination.current_page || 1) - 1, 1)),
     [ui.setHistoryPage, historyPagination.current_page]
   );
 
@@ -268,22 +276,84 @@ function AdminInventoryPageContent() {
     [ui.setHistoryPage, historyPagination.current_page, historyPagination.last_page]
   );
 
+  // ── Bulk action handler ───────────────────────────────────────────────────
+  const handleBulkAction = useCallback(
+    (action) => {
+      const ids = Array.from(ui.selectedIds);
+      if (!ids.length) {
+        window.alert('Select at least one row first.');
+        return;
+      }
+
+      if (action === 'delete') {
+        if (!window.confirm(`Delete ${ids.length} selected row(s)? Quantity must be zero.`)) return;
+        Promise.all(ids.map((id) => deleteMutation.mutateAsync(id)))
+          .then(() => ui.clearSelection())
+          .catch((err) => window.alert(getErrorMessage(err, 'Bulk delete failed.')));
+        return;
+      }
+
+      // restock / adjust — open modal sequentially for each selected row
+      const mode = action; // 'restock' | 'adjust'
+      const rows = inventoryRows.filter((r) => ids.includes(r.inventory_id));
+      if (!rows.length) return;
+
+      bulkQueueRef.current = { rows, mode, index: 0 };
+      ui.openEditModal(rows[0], mode);
+    },
+    [ui, inventoryRows, deleteMutation]
+  );
+
+  // ── Submit handler ────────────────────────────────────────────────────────
   const handleSubmit = useCallback(
     (e) => {
       e.preventDefault();
       if (!storeId) return;
-
       ui.setFormError('');
 
+      const mode = ui.modalMode;
+
+      // edit — no quantity, only batch_no + reorder_level
+      if (mode === 'edit') {
+        const payload = {
+          store_id:      Number(storeId),
+          product_id:    Number(ui.form.product_id),
+          batch_no:      ui.form.batch_no.trim(),
+          reorder_level: Number(ui.form.reorder_level || 0),
+        };
+        saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
+        return;
+      }
+
+      // adjust — signed delta, cannot be zero
+      if (mode === 'adjust') {
+        const delta = parseInt(ui.form.quantity, 10);
+        if (isNaN(delta) || delta === 0) {
+          ui.setFormError('Adjustment amount cannot be zero.');
+          return;
+        }
+        const payload = {
+          quantity:      delta,
+          reorder_level: Number(ui.form.reorder_level || 0),
+        };
+        saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
+        return;
+      }
+
+      // restock or create — quantity >= 1
+      const qty = parseInt(ui.form.quantity, 10);
+      if (isNaN(qty) || qty < 1) {
+        ui.setFormError('Quantity must be at least 1.');
+        return;
+      }
       const payload = {
-        store_id: Number(storeId),
-        product_id: Number(ui.form.product_id),
-        batch_no: ui.form.batch_no.trim(),
-        quantity: Number(ui.form.quantity),
+        store_id:      Number(storeId),
+        product_id:    Number(ui.form.product_id),
+        batch_no:      ui.form.batch_no.trim(),
+        quantity:      qty,
         reorder_level: Number(ui.form.reorder_level || 0),
       };
-
-      saveMutation.mutate({ inventoryId: ui.editingId, payload });
+      saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
     },
     [storeId, ui, saveMutation]
   );
@@ -296,10 +366,9 @@ function AdminInventoryPageContent() {
     [deleteMutation]
   );
 
-  // ── export handler ────────────────────────────────────────────────────────
+  // ── Export handler ────────────────────────────────────────────────────────
   const handleExport = useCallback(
     (format) => {
-      // Build a simple CSV from the current page rows
       if (format === 'csv') {
         const headers = ['Product', 'SKU', 'Category', 'Batch No', 'Quantity', 'Reorder Level', 'Status'];
         const csvRows = inventoryRows.map((row) => {
@@ -349,6 +418,8 @@ function AdminInventoryPageContent() {
           onPageSizeChange={handlePageSizeChange}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
           onExport={handleExport}
+          onBulkAction={handleBulkAction}
+          selectedCount={ui.selectedIds.size}
         />
 
         {pageError && !ui.showModal ? <p className="form-error">{pageError}</p> : null}
@@ -365,6 +436,10 @@ function AdminInventoryPageContent() {
           onDelete={handleDelete}
           onPreviousPage={handlePreviousInventoryPage}
           onNextPage={handleNextInventoryPage}
+          selectedIds={ui.selectedIds}
+          onToggleSelect={ui.toggleSelectRow}
+          onSelectAll={ui.selectAll}
+          onClearSelection={ui.clearSelection}
         />
 
         <InventoryHistoryTable
@@ -384,6 +459,8 @@ function AdminInventoryPageContent() {
       {ui.showModal ? (
         <InventoryFormModal
           editingId={ui.editingId}
+          mode={ui.modalMode}
+          currentQty={ui.editingRow?.quantity}
           form={ui.form}
           setForm={ui.setForm}
           products={products}

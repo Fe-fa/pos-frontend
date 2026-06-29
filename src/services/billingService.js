@@ -36,11 +36,6 @@ export const billingService = {
     return response.data;
   },
 
-  // async items(billingId, params = {}) {
-  //   const response = await api.get(`/billings/${billingId}/items`, { params });
-  //   return response.data;
-  // },
-
   async addItem(billingId, payload) {
     const response = await api.post(`/billings/${billingId}/items`, payload);
     return response.data;
@@ -66,7 +61,14 @@ export const billingService = {
     return response.data;
   },
 
-  async charge(billingId, payload) {
+  // NEW: atomic cart checkout
+  async charge(payload) {
+    const response = await api.post('/billings/charge', payload);
+    return response.data;
+  },
+
+  // LEGACY: charge an already-existing billing
+  async chargeExisting(billingId, payload) {
     const response = await api.post(`/billings/${billingId}/charge`, payload);
     return response.data;
   },

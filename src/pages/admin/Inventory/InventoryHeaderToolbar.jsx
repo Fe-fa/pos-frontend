@@ -1,13 +1,7 @@
 import { memo, useState, useRef, useEffect, useCallback } from 'react';
-import { Plus, Search, Download, ChevronDown, AlertTriangle, Package, DollarSign, TrendingDown, Building2 } from 'lucide-react';
+import { Plus, Search, Download, ChevronDown } from 'lucide-react';
 import Spinner from './Spinner';
 
-/**
- * Page-level toolbar for the inventory section.
- * Matches the screenshot layout:
- *  - Stats row: Total SKUs Tracked | Total Inventory Value | Low Stock Warnings | Dead Stock Lines | Branch Select
- *  - Toolbar row: Search + Search By dropdowns | Show | Store ID | Bulk Actions | Export
- */
 const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
   total,
   totalSkus,
@@ -24,6 +18,8 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
   onPageSizeChange,
   pageSizeOptions,
   onExport,
+  onBulkAction,   // ← NEW: delegate bulk actions to parent
+  selectedCount,  // ← NEW: drives the badge on the Bulk Actions button
 }) {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -31,7 +27,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
   const bulkRef = useRef(null);
   const exportRef = useRef(null);
 
-  // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e) => {
       if (bulkRef.current && !bulkRef.current.contains(e.target)) setBulkOpen(false);
@@ -51,10 +46,11 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
     return `KSH ${Number(val).toLocaleString()}`;
   };
 
+  // ── UPDATED: delegates to parent instead of window.alert ──
   const handleBulkAction = useCallback((action) => {
     setBulkOpen(false);
-    window.alert(`Bulk action: ${action}`);
-  }, []);
+    onBulkAction?.(action);
+  }, [onBulkAction]);
 
   return (
     <>
@@ -88,19 +84,16 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
 
       {/* ── Stats cards row ── */}
       <div className="inv-stats-row">
-        {/* Total SKUs Tracked */}
         <div className="inv-stat-card">
           <p className="inv-stat-label">Total SKUs Tracked</p>
           <strong className="inv-stat-value">{totalSkus || 0}</strong>
         </div>
 
-        {/* Total Inventory Value */}
         <div className="inv-stat-card">
           <p className="inv-stat-label">Total Inventory Value</p>
           <strong className="inv-stat-value">{formatCurrency(totalValue)}</strong>
         </div>
 
-        {/* Low Stock Warnings */}
         <div className="inv-stat-card">
           <p className="inv-stat-label">Low Stock Warnings</p>
           <strong
@@ -111,7 +104,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           </strong>
         </div>
 
-        {/* Dead Stock Lines */}
         <div className="inv-stat-card">
           <p className="inv-stat-label">Dead Stock Lines</p>
           <strong
@@ -122,7 +114,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           </strong>
         </div>
 
-        {/* Branch Select */}
         <div className="inv-stat-card inv-branch-card">
           <p className="inv-stat-label">Branch Select</p>
           <select className="select-input inv-branch-select" defaultValue="">
@@ -133,7 +124,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
 
       {/* ── Search / filter toolbar ── */}
       <div className="inv-toolbar">
-        {/* Search input */}
         <label className="catalog-search inv-search-field">
           <span className="catalog-search-icon">
             <Search size={16} />
@@ -148,7 +138,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           />
         </label>
 
-        {/* Search By filters */}
         <div className="inv-search-by">
           <span className="muted inv-search-by-label">Search By:</span>
           {['Product', 'SKU', 'Batch', 'Supplier'].map((label) => (
@@ -164,7 +153,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           ))}
         </div>
 
-        {/* Show per-page */}
         <label className="inv-show-wrap">
           <span className="muted">Show</span>
           <select
@@ -185,10 +173,9 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           </select>
         </label>
 
-        {/* Store ID pill */}
         <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
 
-        {/* Bulk Actions dropdown */}
+        {/* ── UPDATED: Bulk Actions with selectedCount badge ── */}
         <div className="inv-dropdown-wrap" ref={bulkRef}>
           <button
             type="button"
@@ -205,6 +192,10 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
               </svg>
             </span>
             Bulk Actions
+            {/* Badge — only shown when rows are selected */}
+            {selectedCount > 0 && (
+              <span className="inv-bulk-badge">{selectedCount}</span>
+            )}
             <ChevronDown size={14} />
           </button>
           {bulkOpen && (
@@ -216,7 +207,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           )}
         </div>
 
-        {/* Export dropdown */}
         <div className="inv-dropdown-wrap" ref={exportRef}>
           <button
             type="button"

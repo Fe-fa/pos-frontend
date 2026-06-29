@@ -1,9 +1,9 @@
-import { Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Bell, Coffee, LogOut, Moon, Sun } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
 import { useTheme } from '../../contexts/ThemeContext';
-import { useMemo } from 'react';
-import { Bell, Coffee, LogOut, Moon, Sun } from 'lucide-react';
 import DynamicSidebar from '../../components/layout/DynamicSidebar';
 
 export default function AdminLayout() {
@@ -63,7 +63,7 @@ export default function AdminLayout() {
       </aside>
 
       <section className="main-shell">
-        {isDashboard && (
+        {isDashboard ? (
           <header className="topbar topbar-lumiere">
             <div>
               <h2>Good morning, {user?.first_name || 'there'}</h2>
@@ -77,7 +77,7 @@ export default function AdminLayout() {
             <div className="topbar-actions">
               <button
                 className="ghost-button sidebar-pos-button"
-                onClick={() => navigate('/cashier')}
+                onClick={() => navigate('/cashier/pos')}
               >
                 Open POS
               </button>
@@ -108,13 +108,10 @@ export default function AdminLayout() {
               </button>
             </div>
           </header>
-        )}
+        ) : null}
 
         <main className="page-content">
-          <Outlet
-            key={`store-scope-${storeId || 'all'}`}
-            context={outletContext}
-          />
+          <Outlet key={`store-scope-${storeId || 'all'}`} context={outletContext} />
         </main>
       </section>
     </div>

@@ -17,11 +17,21 @@ export default function LoginPage() {
     setSubmitting(true);
 
     try {
-      const user = await login(form);
-      const next = location.state?.from?.pathname || getUserHomePath(user);
+      const response = await login(form);
+
+      if (response.requires_verification) {
+        navigate('/verify-email', { state: { user: response.user } });
+        return;
+      }
+
+      const next = location.state?.from?.pathname || getUserHomePath(response.user);
       navigate(next, { replace: true });
     } catch (err) {
-      setError(err?.response?.data?.message || err?.response?.data?.errors?.username?.[0] || 'Login failed.');
+      setError(
+        err?.response?.data?.message ||
+        err?.response?.data?.errors?.username?.[0] ||
+        'Login failed.'
+      );
     } finally {
       setSubmitting(false);
     }
@@ -47,7 +57,9 @@ export default function LoginPage() {
             <input className="text-input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required />
           </label>
           {error ? <p className="form-error">{error}</p> : null}
-          <button className="primary-button" disabled={submitting}>{submitting ? 'Signing in...' : 'Login'}</button>
+          <button className="primary-button" disabled={submitting}>
+            {submitting ? 'Signing in...' : 'Login'}
+          </button>
         </form>
 
         <div className="auth-links-row">

@@ -7,7 +7,6 @@ export const AuthContext = createContext(null);
 export { useAuth } from '../hooks/useAuth';
 
 let inflightProfileFetch = null;
-
 const PERMISSION_REFRESH_INTERVAL = 5 * 60 * 1000;
 
 export function AuthProvider({ children }) {
@@ -18,6 +17,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem(storageKeys.token);
     localStorage.removeItem(storageKeys.user);
     localStorage.removeItem(storageKeys.storeId);
+    localStorage.removeItem(storageKeys.pendingVerification);
     inflightProfileFetch = null;
     setUser(null);
   }, []);
@@ -34,18 +34,25 @@ export function AuthProvider({ children }) {
     return response.user;
   }, []);
 
-  // Bootstrap — verify token on mount, clear session if invalid
+  // Bootstrap — skip if pending email verification
   useEffect(() => {
     const token = localStorage.getItem(storageKeys.token);
     if (!token) { setLoading(false); return; }
+
+    const pending = localStorage.getItem(storageKeys.pendingVerification);
+    if (pending) { setLoading(false); return; }
+
     refreshProfile()
       .catch(() => clearSession())
       .finally(() => setLoading(false));
   }, [clearSession, refreshProfile]);
 
-  // Periodic permission refresh — picks up role/permission changes every 5 min
+  // Periodic permission refresh — skip if pending verification
   useEffect(() => {
     if (!user) return;
+    const pending = localStorage.getItem(storageKeys.pendingVerification);
+    if (pending) return;
+
     const interval = setInterval(async () => {
       try {
         await refreshProfile();
@@ -56,19 +63,33 @@ export function AuthProvider({ children }) {
     return () => clearInterval(interval);
   }, [user, refreshProfile, clearSession]);
 
-  // Force logout signal from API interceptor (refresh token expired)
+  // Force logout signal — skip if pending verification
   useEffect(() => {
-    const handler = () => clearSession();
+    const handler = () => {
+      const pending = localStorage.getItem(storageKeys.pendingVerification);
+      if (pending) return;
+      clearSession();
+    };
     window.addEventListener('auth:logout', handler);
     return () => window.removeEventListener('auth:logout', handler);
   }, [clearSession]);
 
   const login = async (payload) => {
-    const response = await authService.login(payload);
-    localStorage.setItem(storageKeys.token, response.access_token);
-    writeJSON(storageKeys.user, response.user);
-    setUser(response.user);
-    return response.user;
+    try {
+      const response = await authService.login(payload);
+      localStorage.setItem(storageKeys.token, response.access_token);
+      writeJSON(storageKeys.user, response.user);
+      setUser(response.user);
+      return response;
+    } catch (err) {
+      if (err?.response?.status === 403 && err?.response?.data?.requires_verification) {
+        const data = err.response.data;
+        localStorage.setItem(storageKeys.token, data.access_token);
+        localStorage.setItem(storageKeys.pendingVerification, '1');
+        return data;
+      }
+      throw err;
+    }
   };
 
   const register = async (payload) => authService.register(payload);

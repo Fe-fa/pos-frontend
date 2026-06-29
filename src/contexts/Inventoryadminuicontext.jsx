@@ -15,18 +15,13 @@ const initialForm = {
   reorder_level: 0,
 };
 
-const DEFAULT_INVENTORY_PAGE_SIZE = 5;
-const DEFAULT_HISTORY_PAGE_SIZE = 10;
-
 const InventoryAdminUIContext = createContext(null);
 
 export function useInventoryAdminUI() {
   const context = useContext(InventoryAdminUIContext);
-
   if (!context) {
     throw new Error('useInventoryAdminUI must be used inside InventoryAdminUIProvider');
   }
-
   return context;
 }
 
@@ -34,18 +29,42 @@ export function InventoryAdminUIProvider({ children }) {
   const [search, setSearch] = useState('');
   const [inventoryPage, setInventoryPage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_INVENTORY_PAGE_SIZE);
-  const [historyPageSize, setHistoryPageSize] = useState(DEFAULT_HISTORY_PAGE_SIZE);
+
+  // null = not yet seeded — seeded from the first successful API response
+  const [pageSize, setPageSize] = useState(null);
+  const [historyPageSize, setHistoryPageSize] = useState(null);
 
   const [form, setForm] = useState(initialForm);
   const [editingId, setEditingId] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [formError, setFormError] = useState('');
+  const [selectedIds, setSelectedIds] = useState(new Set());
+
+  const [modalMode, setModalMode] = useState(null);
+  const [editingRow, setEditingRow] = useState(null);
 
   const resetForm = useCallback(() => {
     setForm(initialForm);
     setEditingId(null);
     setFormError('');
+    setModalMode(null);
+    setEditingRow(null);
+  }, []);
+
+  const toggleSelectRow = useCallback((inventoryId) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(inventoryId) ? next.delete(inventoryId) : next.add(inventoryId);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback((rows) => {
+    setSelectedIds(new Set(rows.map((r) => r.inventory_id)));
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
   }, []);
 
   const openCreateModal = useCallback(() => {
@@ -53,12 +72,14 @@ export function InventoryAdminUIProvider({ children }) {
     setShowModal(true);
   }, [resetForm]);
 
-  const openEditModal = useCallback((row) => {
+  const openEditModal = useCallback((row, mode = 'edit') => {
     setEditingId(row.inventory_id);
+    setEditingRow(row);
+    setModalMode(mode);
     setForm({
-      product_id: row.product_id,
-      batch_no: row.batch_no || '',
-      quantity: '',
+      product_id:    row.product_id,
+      batch_no:      row.batch_no || '',
+      quantity:      '',
       reorder_level: row.reorder_level || 0,
     });
     setFormError('');
@@ -75,9 +96,11 @@ export function InventoryAdminUIProvider({ children }) {
     setSearch('');
     setInventoryPage(1);
     setHistoryPage(1);
-    setPageSize(DEFAULT_INVENTORY_PAGE_SIZE);
-    setHistoryPageSize(DEFAULT_HISTORY_PAGE_SIZE);
+    // reset to null so the next store's backend default takes effect
+    setPageSize(null);
+    setHistoryPageSize(null);
     setShowModal(false);
+    setSelectedIds(new Set());
     resetForm();
   }, [resetForm]);
 
@@ -106,6 +129,14 @@ export function InventoryAdminUIProvider({ children }) {
       openEditModal,
       closeModal,
       resetForStoreChange,
+      modalMode,
+      setModalMode,
+      editingRow,
+      setEditingRow,
+      selectedIds,
+      toggleSelectRow,
+      selectAll,
+      clearSelection,
     }),
     [
       search,
@@ -122,6 +153,12 @@ export function InventoryAdminUIProvider({ children }) {
       openEditModal,
       closeModal,
       resetForStoreChange,
+      modalMode,
+      editingRow,
+      selectedIds,
+      toggleSelectRow,
+      selectAll,
+      clearSelection,
     ]
   );
 

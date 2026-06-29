@@ -1,5 +1,5 @@
 import { memo, useCallback } from 'react';
-import { Edit, Trash2, RefreshCw, SlidersHorizontal, Eye, AlertTriangle } from 'lucide-react';
+import { Edit, Trash2, RefreshCw, SlidersHorizontal, AlertTriangle } from 'lucide-react';
 import { getInventoryStatus } from './inventoryHelpers';
 import PaginationControls from './PaginationControls';
 import Spinner from './Spinner';
@@ -12,11 +12,9 @@ function getStatusPill(row) {
   if (quantity <= 0) {
     return { label: 'Out of Stock', tone: 'out', css: 'inv-pill-out' };
   }
-  // Critical Low: quantity > 0 but <= reorder_level (and reorder > 0)
   if (reorder > 0 && quantity <= reorder) {
     return { label: 'Critical Low', tone: 'critical', css: 'inv-pill-critical' };
   }
-  // Low Stock: between reorder+1 and 12
   if (quantity <= 12) {
     return { label: 'Low Stock', tone: 'low', css: 'inv-pill-low' };
   }
@@ -30,21 +28,31 @@ function shouldShowWarning(row) {
 }
 
 // ─── InventoryRow ──────────────────────────────────────────────────────────────
-const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending, onEdit, onDelete }) {
+const InventoryRow = memo(function InventoryRow({ row, selected, onToggle,canManage, deletePending, onEdit, onDelete }) {
   const status = getStatusPill(row);
   const showWarning = shouldShowWarning(row);
 
-  const handleEdit = useCallback(() => onEdit(row), [onEdit, row]);
-  const handleDelete = useCallback(() => onDelete(row.inventory_id), [onDelete, row.inventory_id]);
+  // ── UPDATED: each button gets its own handler with the correct mode ──
+  const handleEdit    = useCallback(() => onEdit(row, 'edit'),    [onEdit, row]);
+  const handleRestock = useCallback(() => onEdit(row, 'restock'), [onEdit, row]);
+  const handleAdjust  = useCallback(() => onEdit(row, 'adjust'),  [onEdit, row]);
+  const handleDelete  = useCallback(() => onDelete(row.inventory_id), [onDelete, row.inventory_id]);
 
-  const productName = row.product?.product_name || 'Unknown product';
-  const productSku = row.product?.sku || 'No SKU';
+  const productName  = row.product?.product_name || 'Unknown product';
+  const productSku   = row.product?.sku || 'No SKU';
   const categoryName = row.product?.category?.category_name || 'Category';
   const supplierName = row.supplier_name || row.product?.supplier_name || 'Unity Chepkirui';
-  const imageUrl = row.product?.image_url;
+  const imageUrl     = row.product?.image_url;
 
   return (
-    <tr>
+ <tr className={selected ? 'inv-row--selected' : ''}>
+      <td>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggle(row.inventory_id)}
+        />
+      </td>
       {/* Product — thumbnail + name + SKU */}
       <td>
         <div className="inv-product-cell">
@@ -94,7 +102,7 @@ const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending,
       {/* Actions */}
       <td>
         <div className="catalog-action-group">
-          {/* Edit */}
+          {/* Edit — opens modal in 'edit' mode: change reorder level / batch ref */}
           <button
             type="button"
             className="catalog-icon-btn"
@@ -105,29 +113,29 @@ const InventoryRow = memo(function InventoryRow({ row, canManage, deletePending,
             <Edit size={15} />
           </button>
 
-          {/* Restock (add stock) — also opens the edit/update modal */}
+          {/* Restock — opens modal in 'restock' mode: add qty to this FIFO layer */}
           <button
             type="button"
             className="catalog-icon-btn"
-            onClick={handleEdit}
+            onClick={handleRestock}
             title="Restock"
             disabled={!canManage}
           >
             <RefreshCw size={15} />
           </button>
 
-          {/* Adjust */}
+          {/* Adjust — opens modal in 'adjust' mode: signed delta correction */}
           <button
             type="button"
             className="catalog-icon-btn"
-            onClick={handleEdit}
+            onClick={handleAdjust}
             title="Adjust"
             disabled={!canManage}
           >
             <SlidersHorizontal size={15} />
           </button>
 
-          {/* View / Delete */}
+          {/* Delete */}
           <button
             type="button"
             className="catalog-icon-btn danger"
@@ -156,13 +164,28 @@ export default function InventoryTable({
   onDelete,
   onPreviousPage,
   onNextPage,
+  // ← ADD THESE THREE:
+  selectedIds,
+  onToggleSelect,
+  onSelectAll,
+  onClearSelection,
 }) {
+  const allSelected = rows.length > 0 && rows.every((r) => selectedIds.has(r.inventory_id));
+
   return (
     <article className="catalog-table-card">
       <div className="table-wrap">
         <table className="data-table">
           <thead>
             <tr>
+              {/* ← SELECT-ALL CHECKBOX HERE */}
+              <th>
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() => allSelected ? onClearSelection() : onSelectAll(rows)}
+                />
+              </th>
               <th>Product</th>
               <th>Category</th>
               <th>Batch No</th>
@@ -177,13 +200,13 @@ export default function InventoryTable({
           <tbody>
             {!storeId ? (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell">
+                <td colSpan="9" className="catalog-empty-cell">
                   Select a store first.
                 </td>
               </tr>
             ) : isLoading && !rows.length ? (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
+                <td colSpan="9" className="catalog-empty-cell" style={{ padding: '32px 0' }}>
                   <Spinner
                     size={20}
                     style={{ margin: '0 auto', display: 'block', color: 'var(--color-text-secondary)' }}
@@ -199,11 +222,14 @@ export default function InventoryTable({
                   deletePending={deletePending}
                   onEdit={onEdit}
                   onDelete={onDelete}
+                  // ← ADD THESE TWO:
+                  selected={selectedIds.has(row.inventory_id)}
+                  onToggle={onToggleSelect}
                 />
               ))
             ) : (
               <tr>
-                <td colSpan="8" className="catalog-empty-cell">
+                <td colSpan="9" className="catalog-empty-cell">
                   No inventory rows found.
                 </td>
               </tr>

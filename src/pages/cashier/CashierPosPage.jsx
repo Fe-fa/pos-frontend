@@ -12,30 +12,27 @@ import {
   Trash2,
   Download,
 } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
 import ProductListRow from '../../components/card/ProductListRow';
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import ProductCard from '../../components/card/ProductCard';
+import PaymentModal from '../../components/modals/PaymentModal';
+import DraftModal from '../../components/modals/DraftModal';
+import CustomerModal from '../../components/modals/CustomerModal';
+
 import { useAuth } from '../../contexts/AuthContext';
 import { useStore } from '../../contexts/StoreContext';
+
 import { billingService } from '../../services/billingService';
 import { categoryService } from '../../services/categoryService';
 import { customerService } from '../../services/customerService';
 import { productService } from '../../services/productService';
 import { rewardService } from '../../services/rewardService';
+import { storeService } from '../../services/storeService';
+
 import { currency, formatDateTime } from '../../utils/helpers';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { mergeStoreSettings } from '../../utils/storeSettings';
-import PaymentModal from '../../components/modals/PaymentModal';
-import DraftModal from '../../components/modals/DraftModal';
-import CustomerModal from '../../components/modals/CustomerModal';
-import ProductCard from '../../components/card/ProductCard';
-import { storeService } from '../../services/storeService';
 
 const SEARCH_DEBOUNCE_MS = 500;
 const PRODUCT_CACHE_TTL_MS = 60_000;
@@ -44,10 +41,9 @@ const FALLBACK_PER_PAGE = 12;
 const DEFAULT_VAT_RATE = 16;
 
 const PRODUCT_GRID_GAP = 16;
-const PRODUCT_GRID_MIN_COL_WIDTH = 220;
-const PRODUCT_CARD_ESTIMATED_HEIGHT = 255; // 👈 Set to ~255 to eliminate the vertical whitespace gap
+const PRODUCT_CARD_ESTIMATED_HEIGHT = 255;
 const PRODUCT_GRID_OVERSCAN_ROWS = 2;
-const PRODUCT_VIEWPORT_MAX_HEIGHT = 'calc(100vh - 250px)'; // 👈 Fixed the 'pxpx' typo to 'px'
+const PRODUCT_VIEWPORT_MAX_HEIGHT = 'calc(100vh - 250px)';
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || '';
 
@@ -63,8 +59,7 @@ const extractMeta = (res) => res?.meta || res?.data?.meta || {};
 const getCategoryId = (category) =>
   category?.category_id ?? category?.id ?? category?.value ?? null;
 
-const getCustomerId = (customer) =>
-  customer?.customer_id ?? customer?.id ?? null;
+const getCustomerId = (customer) => customer?.customer_id ?? customer?.id ?? null;
 
 const getProductImage = (product) => {
   const rawPath =
@@ -87,9 +82,9 @@ const getProductImage = (product) => {
 const getItemTotal = (item) =>
   Number(
     item?.total_amount ??
-    item?.line_total ??
-    item?.line_subtotal ??
-    Number(item?.quantity || 0) * Number(item?.unit_price || 0)
+      item?.line_total ??
+      item?.line_subtotal ??
+      Number(item?.quantity || 0) * Number(item?.unit_price || 0)
   );
 
 const isTypingElement = (target) => {
@@ -135,7 +130,6 @@ const emptyPageInfo = () => ({
   perPage: FALLBACK_PER_PAGE,
 });
 
-/* ----------------------- local-cart math ----------------------- */
 const calcLineFromGross = (qty, unitPrice, vatRate) => {
   const q = Number(qty || 0);
   const p = Number(unitPrice || 0);
@@ -143,16 +137,22 @@ const calcLineFromGross = (qty, unitPrice, vatRate) => {
   const totalAmount = +(q * p).toFixed(2);
   const lineSubtotal = +(totalAmount / (1 + v / 100)).toFixed(2);
   const vatAmount = +(totalAmount - lineSubtotal).toFixed(2);
-  return { line_subtotal: lineSubtotal, vat_amount: vatAmount, total_amount: totalAmount };
+
+  return {
+    line_subtotal: lineSubtotal,
+    vat_amount: vatAmount,
+    total_amount: totalAmount,
+  };
 };
 
 const recalcBillingTotals = (billing) => {
   if (!billing) return billing;
+
   const items = billing.items || [];
-  const subtotal = items.reduce((s, it) => s + Number(it.line_subtotal || 0), 0);
-  const vat_amount = items.reduce((s, it) => s + Number(it.vat_amount || 0), 0);
+  const subtotal = items.reduce((sum, it) => sum + Number(it.line_subtotal || 0), 0);
+  const vat_amount = items.reduce((sum, it) => sum + Number(it.vat_amount || 0), 0);
   const total = +(subtotal + vat_amount).toFixed(2);
-  const grossTotal = items.reduce((s, it) => s + Number(it.total_amount || 0), 0);
+  const grossTotal = items.reduce((sum, it) => sum + Number(it.total_amount || 0), 0);
   const blendedRate =
     subtotal > 0 ? +((vat_amount / subtotal) * 100).toFixed(2) : DEFAULT_VAT_RATE;
 
@@ -167,9 +167,7 @@ const recalcBillingTotals = (billing) => {
 };
 
 const buildLocalItem = (product, quantity = 1, overrides = {}) => {
-  const unitPrice = Number(
-    (overrides.unit_price ?? overrides.unitPrice ?? product.price) || 0
-  );
+  const unitPrice = Number((overrides.unit_price ?? overrides.unitPrice ?? product.price) || 0);
   const vatRate = Number(
     overrides.vat_rate ?? overrides.vatRate ?? product.vat_rate ?? DEFAULT_VAT_RATE
   );
@@ -210,7 +208,6 @@ const buildEmptyLocalBilling = () => ({
   __local: true,
 });
 
-/* ----------------------- localStorage layer ----------------------- */
 const LS_PREFIX = 'pos.cart.v1';
 const cartStorageKey = (storeId, userId) =>
   `${LS_PREFIX}::store_${storeId || 'na'}::user_${userId || 'na'}`;
@@ -220,8 +217,7 @@ const safeLoadCart = (key) => {
     const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed;
+    return parsed && typeof parsed === 'object' ? parsed : null;
   } catch {
     return null;
   }
@@ -247,7 +243,52 @@ const safeClearCart = (key) => {
   }
 };
 
-/* ----------------------- hooks ----------------------- */
+const clonePersistedItems = (items = []) =>
+  items.map((it) => ({
+    billing_item_id: it.billing_item_id,
+    product_id: it.product_id,
+    product: it.product
+      ? {
+          product_id: it.product.product_id,
+          product_name: it.product.product_name,
+          sku: it.product.sku,
+          price: it.product.price,
+          vat_rate: it.product.vat_rate,
+        }
+      : null,
+    quantity: Number(it.quantity || 0),
+    unit_price: Number(it.unit_price || 0),
+    vat_rate: Number(it.vat_rate ?? DEFAULT_VAT_RATE),
+    line_subtotal: Number(it.line_subtotal || 0),
+    vat_amount: Number(it.vat_amount || 0),
+    total_amount: Number(it.total_amount || 0),
+    __local: !!it.__local,
+  }));
+
+const buildPersistedCartSnapshot = ({ billing, selectedCustomerId, notes, storeId, userId }) => ({
+  v: 1,
+  savedAt: Date.now(),
+  storeId: String(storeId || ''),
+  userId: String(userId || ''),
+  billing: billing
+    ? {
+        billing_id: billing.billing_id || null,
+        invnumber: billing.invnumber || null,
+        is_draft: billing.is_draft ?? true,
+        status: billing.status || null,
+        customer_id: billing.customer_id || null,
+        notes: billing.notes || null,
+        subtotal: Number(billing.subtotal || 0),
+        vat_amount: Number(billing.vat_amount || 0),
+        total: Number(billing.total || 0),
+        vat_rate: Number(billing.vat_rate || DEFAULT_VAT_RATE),
+        items: clonePersistedItems(billing.items || []),
+      }
+    : buildEmptyLocalBilling(),
+  selectedCustomerId: selectedCustomerId || '',
+  notes: notes || '',
+});
+
 function useDebouncedValue(value, delay) {
   const [debounced, setDebounced] = useState(value);
 
@@ -274,8 +315,7 @@ function useElementSize(ref) {
     };
 
     update();
-
-    const observer = new ResizeObserver(() => update());
+    const observer = new ResizeObserver(update);
     observer.observe(el);
 
     return () => observer.disconnect();
@@ -313,7 +353,6 @@ function useScrollTop(ref) {
   return scrollTop;
 }
 
-/* ----------------------- memoized render blocks ----------------------- */
 const MemoProductCard = memo(function MemoProductCard(props) {
   return <ProductCard {...props} />;
 });
@@ -333,12 +372,12 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
   const viewportRef = useRef(null);
   const { width, height } = useElementSize(viewportRef);
   const scrollTop = useScrollTop(viewportRef);
+
   useEffect(() => {
     if (!viewportRef.current) return;
     viewportRef.current.scrollTop = 0;
   }, [resetKey]);
 
-  // ✅ useMemo MUST come before any early return
   const virtualState = useMemo(() => {
     const safeWidth = Math.max(width, 400);
     const columns = 4;
@@ -352,8 +391,9 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
     const endRow = Math.min(
       totalRows,
       Math.ceil((scrollTop + viewportHeight) / PRODUCT_CARD_ESTIMATED_HEIGHT) +
-      PRODUCT_GRID_OVERSCAN_ROWS
+        PRODUCT_GRID_OVERSCAN_ROWS
     );
+
     const cells = [];
     for (let row = startRow; row < endRow; row += 1) {
       for (let col = 0; col < columns; col += 1) {
@@ -372,10 +412,8 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
         });
       }
     }
-    const totalHeight = Math.max(
-      totalRows * PRODUCT_CARD_ESTIMATED_HEIGHT - PRODUCT_GRID_GAP,
-      0
-    );
+
+    const totalHeight = Math.max(totalRows * PRODUCT_CARD_ESTIMATED_HEIGHT - PRODUCT_GRID_GAP, 0);
     return { cells, totalHeight };
   }, [products, width, height, scrollTop]);
 
@@ -393,6 +431,7 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
         {!productsLoading && !products.length ? (
           <div className="card"><p>Empty.</p></div>
         ) : null}
+
         <div className="product-list">
           {products.map((item, index) => (
             <ProductListRow
@@ -417,19 +456,17 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
       className="products-viewport"
       style={{
         position: 'relative',
-        overflowY: 'auto', // 👈 Keep this so your scroll math works!
+        overflowY: 'auto',
         overflowX: 'hidden',
         maxHeight: PRODUCT_VIEWPORT_MAX_HEIGHT,
         minHeight: 360,
-        /* 👇 This masks the top edge while leaving the bottom edge completely open */
         maskImage: 'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
-        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
+        WebkitMaskImage:
+          'linear-gradient(to bottom, transparent 0px, black 20px, black 100%)',
       }}
     >
       {!productsLoading && !products.length ? (
-        <div className="card">
-          <p>Empty.</p>
-        </div>
+        <div className="card"><p>Empty.</p></div>
       ) : null}
 
       {products.length ? (
@@ -463,7 +500,6 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
     </div>
   );
 });
-
 const BillingItemsList = memo(function BillingItemsList({
   items,
   currentStore,
@@ -488,21 +524,13 @@ const BillingItemsList = memo(function BillingItemsList({
 
       <div className="billing-item-actions">
         <div className="quantity-control">
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => onDecrease(item)}
-          >
+          <button type="button" className="icon-button" onClick={() => onDecrease(item)}>
             <Minus size={14} />
           </button>
 
           <span className="quantity-display">{item.quantity}</span>
 
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => onIncrease(item)}
-          >
+          <button type="button" className="icon-button" onClick={() => onIncrease(item)}>
             <Plus size={14} />
           </button>
         </div>
@@ -525,9 +553,10 @@ const BillingItemsList = memo(function BillingItemsList({
 
 export default function CashierPosPage() {
   const { user, can } = useAuth();
+  const { stores, storeId } = useStore();
+
   const canDraft = can('pos.draft');
   const canVoid = can('pos.void');
-  const { stores, storeId, loading: storeLoading } = useStore();
 
   const currentStore = useMemo(
     () => stores.find((store) => String(store.store_id) === String(storeId)),
@@ -535,11 +564,13 @@ export default function CashierPosPage() {
   );
 
   const [printSettings, setPrintSettings] = useState(() => mergeStoreSettings());
+
   useEffect(() => {
     if (!currentStore?.store_id) return;
     let cancelled = false;
 
-    storeService.getSettings(currentStore.store_id)
+    storeService
+      .getSettings(currentStore.store_id)
       .then((response) => {
         if (cancelled) return;
         const payload = response?.data?.data ?? response?.data ?? response ?? {};
@@ -549,30 +580,23 @@ export default function CashierPosPage() {
         if (!cancelled) setPrintSettings(mergeStoreSettings(currentStore));
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [currentStore?.store_id]);
 
-
-  /* --- refs ----------------------------------------------------------- */
   const searchInputRef = useRef(null);
-
   const bootstrapProductsFetchedRef = useRef(false);
-
   const categoryCacheRef = useRef(new Map());
   const categoryRequestIdRef = useRef(0);
-
   const productCacheRef = useRef(new Map());
   const productRequestIdRef = useRef(0);
-
   const lastProductFilterRef = useRef('');
   const prefetchedKeysRef = useRef(new Set());
   const bootstrappedRef = useRef(false);
-  const bootstrapRequestId = useRef(0);
 
-  const syncQueueRef = useRef(Promise.resolve());
   const billingRef = useRef(null);
   const cartStorageKeyRef = useRef('');
-  const hydratedFromStorageRef = useRef(false);
 
   const productFiltersRef = useRef({
     storeId: '',
@@ -585,18 +609,21 @@ export default function CashierPosPage() {
   const loadDraftsRef = useRef(null);
   const loadCustomersRef = useRef(null);
   const loadBillingDetailRef = useRef(null);
-
   const hotkeyContextRef = useRef(null);
+  const draftServerSnapshotRef = useRef([]);
 
-  /* --- state ---------------------------------------------------------- */
+
+  const lastSyncedHeaderRef = useRef({
+    customerId: null,
+    notes: null,
+    billingId: null,
+  });
+
   const [categories, setCategories] = useState([]);
   const [categoryPageInfo, setCategoryPageInfo] = useState(emptyPageInfo());
-
   const [products, setProducts] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [customers, setCustomers] = useState([]);
-  const [customersLoading, setCustomersLoading] = useState(false);
-
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [search, setSearch] = useState('');
@@ -604,7 +631,6 @@ export default function CashierPosPage() {
 
   const [draftSearch, setDraftSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
-
   const [productPageInfo, setProductPageInfo] = useState(emptyPageInfo());
 
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
@@ -615,20 +641,19 @@ export default function CashierPosPage() {
   const [loyaltyRule, setLoyaltyRule] = useState(null);
   const [chapa5ClaimedQty, setChapa5ClaimedQty] = useState(0);
 
-  const chapa5 = loyaltyRule?.chapa5 ?? null;
-
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [isBalanceSettlement, setIsBalanceSettlement] = useState(false);
+  const [isPreparingPayment, setIsPreparingPayment] = useState(false);
 
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
   const [productsLoading, setProductsLoading] = useState(false);
   const [draftsLoading, setDraftsLoading] = useState(false);
+  const [customersLoading, setCustomersLoading] = useState(false);
   const [billingLoading, setBillingLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-
   const [catalogReady, setCatalogReady] = useState(false);
 
   const [error, setError] = useState('');
@@ -637,10 +662,9 @@ export default function CashierPosPage() {
   const [categorySearch, setCategorySearch] = useState('');
   const [categorySearchOpen, setCategorySearchOpen] = useState(false);
 
-  const visibleCategories = categories;
-
   const debouncedCategorySearch = useDebouncedValue(categorySearch.trim(), 400);
-
+  const visibleCategories = categories;
+  const chapa5 = loyaltyRule?.chapa5 ?? null;
 
   const activeCategoryId = useMemo(() => {
     if (activeCategory === 'all') return null;
@@ -671,76 +695,10 @@ export default function CashierPosPage() {
   const canPrevCategory = categoryPageInfo.hasPrevPage;
   const canNextCategory = categoryPageInfo.hasNextPage;
 
-  useEffect(() => {
-    billingRef.current = billing;
-  }, [billing]);
-
-  useEffect(() => {
-    cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id);
-  }, [storeId, user?.user_id]);
-
-  useEffect(() => {
-    productFiltersRef.current = {
-      storeId: String(storeId || ''),
-      activeCategoryId,
-      scopeKey: effectiveCategoryScopeKey,
-      search: debouncedSearch,
-    };
-  }, [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]);
-
-  useEffect(() => {
-    const key = cartStorageKeyRef.current;
-    if (!key || !hydratedFromStorageRef.current) return;
-
-    if (!billing || !billing.items?.length) {
-      safeClearCart(key);
-      return;
-    }
-    const snapshot = {
-      v: 1,
-      savedAt: Date.now(),
-      storeId: String(storeId || ''),
-      userId: String(user?.user_id || ''),
-
-      billing: {
-        billing_id: billing.billing_id || null,
-        invnumber: billing.invnumber || null,
-        is_draft: billing.is_draft ?? true,   // ← preserve the actual status
-        status: billing.status || null,        // ← save status too for extra safety
-        customer_id: billing.customer_id || null,
-
-        notes: billing.notes || null,
-        subtotal: billing.subtotal || 0,
-        vat_amount: billing.vat_amount || 0,
-        total: billing.total || 0,
-        vat_rate: billing.vat_rate || DEFAULT_VAT_RATE,
-        items: (billing.items || []).map((it) => ({
-          billing_item_id: it.billing_item_id,
-          product_id: it.product_id,
-          product: it.product
-            ? {
-              product_id: it.product.product_id,
-              product_name: it.product.product_name,
-              sku: it.product.sku,
-              price: it.product.price,
-              vat_rate: it.product.vat_rate,
-            }
-            : null,
-          quantity: it.quantity,
-          unit_price: it.unit_price,
-          vat_rate: it.vat_rate,
-          line_subtotal: it.line_subtotal,
-          vat_amount: it.vat_amount,
-          total_amount: it.total_amount,
-          __local: !!it.__local,
-        })),
-      },
-      selectedCustomerId: selectedCustomerId || '',
-      notes: notes || '',
-    };
-
-    safeSaveCart(key, snapshot);
-  }, [billing, selectedCustomerId, notes, storeId, user?.user_id]);
+  const itemCount = useMemo(
+    () => billing?.items?.reduce((sum, item) => sum + Number(item.quantity || 0), 0) || 0,
+    [billing?.items]
+  );
 
   const chapa5Preview = useMemo(() => {
     if (!chapa5?.enabled || !billing?.items?.length) return null;
@@ -782,16 +740,64 @@ export default function CashierPosPage() {
     };
   }, [chapa5, billing?.items, chapa5ClaimedQty]);
 
-  /* =====================================================================
-     SYNC QUEUE
-     ===================================================================== */
-  const enqueueSync = useCallback((task) => {
-    const next = syncQueueRef.current.then(task, task);
-    syncQueueRef.current = next.catch(() => { });
-    return next;
-  }, []);
+  const filteredDrafts = useMemo(() => {
+    const keyword = draftSearch.trim().toLowerCase();
 
-  /* --- helpers -------------------------------------------------------- */
+    return drafts
+      .filter((draft) => String(draft.billing_id) !== String(billing?.billing_id))
+      .filter((draft) => {
+        if (!keyword) return true;
+        const haystack = [
+          draft?.invnumber,
+          `Draft #${draft?.billing_id || ''}`,
+          draft?.customer?.full_name,
+          draft?.customer?.phone,
+          draft?.customer?.email,
+          draft?.notes,
+          String(draft?.total || ''),
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(keyword);
+      });
+  }, [drafts, draftSearch, billing?.billing_id]);
+
+  const customerCurrentBalance = useMemo(
+    () =>
+      Number(
+        billing?.customer?.current_balance ??
+          selectedCustomer?.current_balance ??
+          selectedCustomer?.balance ??
+          selectedCustomer?.opening_balance ??
+          0
+      ),
+    [billing?.customer, selectedCustomer]
+  );
+
+  useEffect(() => {
+    billingRef.current = billing;
+  }, [billing]);
+
+  useEffect(() => {
+    cartStorageKeyRef.current = cartStorageKey(storeId, user?.user_id);
+  }, [storeId, user?.user_id]);
+
+  useEffect(() => {
+    productFiltersRef.current = {
+      storeId: String(storeId || ''),
+      activeCategoryId,
+      scopeKey: effectiveCategoryScopeKey,
+      search: debouncedSearch,
+    };
+  }, [storeId, activeCategoryId, effectiveCategoryScopeKey, debouncedSearch]);
+
+  useEffect(() => {
+    if (!success) return;
+    const timer = setTimeout(() => setSuccess(''), 3000);
+    return () => clearTimeout(timer);
+  }, [success]);
+
   const focusSearchInput = useCallback((selectText = false) => {
     window.requestAnimationFrame(() => {
       const input = searchInputRef.current;
@@ -811,18 +817,20 @@ export default function CashierPosPage() {
     [user]
   );
 
-  const resetSale = useCallback(() => {
-    setBilling(null);
-    setSelectedCustomerId('');
-    setSelectedCustomer(null);
-    setNotes('');
-    setChapa5ClaimedQty(0);
-    setShowPaymentModal(false);
-    setShowCustomerModal(false);
-    setIsBalanceSettlement(false);
-    safeClearCart(cartStorageKeyRef.current);
-    lastSyncedHeaderRef.current = { customerId: null, notes: null, billingId: null };
-  }, []);
+const resetSale = useCallback(() => {
+  setBilling(null);
+  setSelectedCustomerId('');
+  setSelectedCustomer(null);
+  setNotes('');
+  setChapa5ClaimedQty(0);
+  setShowPaymentModal(false);
+  setShowCustomerModal(false);
+  setIsBalanceSettlement(false);
+
+  draftServerSnapshotRef.current = [];
+  lastSyncedHeaderRef.current = { customerId: null, notes: null, billingId: null };
+}, []);
+
 
   const resetProductState = useCallback(() => {
     setProducts([]);
@@ -863,9 +871,6 @@ export default function CashierPosPage() {
     throw new Error('Delete billing method is not implemented in billingService.');
   }, []);
 
-  /* =====================================================================
-     CATEGORY PAGE FETCHING
-     ===================================================================== */
   const buildCategoryCacheKey = useCallback(
     (page) =>
       JSON.stringify({
@@ -913,7 +918,6 @@ export default function CashierPosPage() {
         categoryCacheRef.current.set(cacheKey, { items, pageInfo, ts: Date.now() });
         setCategories(items);
         setCategoryPageInfo(pageInfo);
-
         return { items, pageInfo };
       } catch (err) {
         if (requestId === categoryRequestIdRef.current) {
@@ -932,11 +936,11 @@ export default function CashierPosPage() {
     },
     [storeId, buildCategoryCacheKey]
   );
+
   useEffect(() => {
     if (!storeId || !bootstrappedRef.current) return;
 
     if (!debouncedCategorySearch) {
-      // restore page 1 from cache when cleared
       loadCategoriesPage(1, { silent: true });
       return;
     }
@@ -946,14 +950,14 @@ export default function CashierPosPage() {
       .list({
         store_id: Number(storeId),
         search: debouncedCategorySearch,
-        per_page: 100, // fetch enough to show all matches
+        per_page: 100,
       })
       .then((response) => {
         const items = extractList(response);
         setCategories(items);
-        setCategoryPageInfo(emptyPageInfo()); // hide pagination while searching
+        setCategoryPageInfo(emptyPageInfo());
       })
-      .catch(() => { })
+      .catch(() => {})
       .finally(() => setCategoriesLoading(false));
   }, [debouncedCategorySearch, storeId, loadCategoriesPage]);
 
@@ -967,7 +971,6 @@ export default function CashierPosPage() {
 
     try {
       const categoryResult = await loadCategoriesPage(1, { force: true, silent: true });
-
       return {
         categories: categoryResult.items,
         categoryPageInfo: categoryResult.pageInfo,
@@ -975,7 +978,8 @@ export default function CashierPosPage() {
     } catch (err) {
       console.error('POS catalog load failed:', err);
       setError(
-        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'
+        `Failed to load catalog: ${
+          err?.response?.data?.message || err?.message || 'Network Error'
         }`
       );
       return { categories: [], categoryPageInfo: emptyPageInfo() };
@@ -984,9 +988,6 @@ export default function CashierPosPage() {
     }
   }, [storeId, loadCategoriesPage]);
 
-  /* =====================================================================
-     PRODUCTS
-     ===================================================================== */
   const buildCacheKey = useCallback(
     (
       page,
@@ -1007,7 +1008,6 @@ export default function CashierPosPage() {
   const fetchProductsPage = useCallback(
     async (page, categoryId = productFiltersRef.current.activeCategoryId) => {
       const { storeId: sid, search: searchTerm } = productFiltersRef.current;
-
       const params = {
         store_id: Number(sid),
         page,
@@ -1015,7 +1015,6 @@ export default function CashierPosPage() {
       };
 
       if (categoryId != null) params.category_id = categoryId;
-
       const normalizedSearch = String(searchTerm || '').trim();
       if (normalizedSearch) params.search = normalizedSearch;
 
@@ -1083,9 +1082,6 @@ export default function CashierPosPage() {
     [storeId, buildCacheKey, fetchProductsPage]
   );
 
-  /* =====================================================================
-     DRAFTS
-     ===================================================================== */
   const loadDrafts = useCallback(
     async ({ silent = false } = {}) => {
       if (!storeId) return;
@@ -1116,9 +1112,6 @@ export default function CashierPosPage() {
     [storeId, isOwnedByCurrentCashier]
   );
 
-  /* =====================================================================
-   CUSTOMERS
-   ===================================================================== */
   const loadCustomers = useCallback(
     async ({ silent = false } = {}) => {
       if (!storeId) {
@@ -1143,41 +1136,145 @@ export default function CashierPosPage() {
     [storeId]
   );
 
-  /* =====================================================================
-     BILLING DETAIL
-     ===================================================================== */
-  const loadBillingDetail = useCallback(
-    async (billingId, { silent = false } = {}) => {
-      if (!billingId) return null;
-      if (!silent) setBillingLoading(true);
+const loadBillingDetail = useCallback(
+  async (billingId, { silent = false } = {}) => {
+    if (!billingId) return null;
+    if (!silent) setBillingLoading(true);
 
-      try {
-        const response = await billingService.show(billingId);
-        const detail = response?.data || response;
-        const enriched = { ...detail, __local: false };
-        setBilling(enriched);
-        setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
-        setNotes(detail?.notes || '');
-        mergeDraftPreview(detail);
-        return enriched;
-      } catch (err) {
-        setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
-        throw err;
-      } finally {
-        if (!silent) setBillingLoading(false);
-      }
-    },
-    [mergeDraftPreview]
-  );
+    try {
+      const response = await billingService.show(billingId);
+      const detail = response?.data || response;
+
+      const enriched = {
+        ...detail,
+        __local: false,
+      };
+
+      draftServerSnapshotRef.current = clonePersistedItems(detail?.items || []);
+      lastSyncedHeaderRef.current = {
+        billingId: detail?.billing_id || null,
+        customerId: detail?.customer_id || null,
+        notes: detail?.notes || null,
+      };
+
+      setBilling(enriched);
+      setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
+      setNotes(detail?.notes || '');
+      mergeDraftPreview(detail);
+
+      return enriched;
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
+      throw err;
+    } finally {
+      if (!silent) setBillingLoading(false);
+    }
+  },
+  [mergeDraftPreview]
+);
+
+const isServerBackedItem = (item) =>
+  !!item?.billing_item_id &&
+  !String(item.billing_item_id).startsWith('local-') &&
+  !item?.__local;
+
+const syncDraftItemsToServer = useCallback(
+  async (billingId, localItems = []) => {
+    if (!billingId) return null;
+
+    const originalItems = Array.isArray(draftServerSnapshotRef.current)
+      ? draftServerSnapshotRef.current
+      : [];
+
+    const originalServerItems = originalItems.filter(isServerBackedItem);
+    const localServerItems = (localItems || []).filter(isServerBackedItem);
+    const localNewItems = (localItems || []).filter(
+      (item) =>
+        !!item?.product_id &&
+        (item?.__local || String(item?.billing_item_id || '').startsWith('local-'))
+    );
+
+    const originalById = new Map(
+      originalServerItems.map((item) => [String(item.billing_item_id), item])
+    );
+
+    const localServerIds = new Set(
+      localServerItems.map((item) => String(item.billing_item_id))
+    );
+
+    const removedCalls = originalServerItems
+      .filter((item) => !localServerIds.has(String(item.billing_item_id)))
+      .map((item) => billingService.removeItem(item.billing_item_id));
+
+    const updatedCalls = localServerItems
+      .filter((item) => {
+        const original = originalById.get(String(item.billing_item_id));
+        if (!original) return false;
+
+        const qtyChanged =
+          Number(original.quantity || 0) !== Number(item.quantity || 0);
+
+        const priceChanged =
+          Number(original.unit_price || 0).toFixed(2) !==
+          Number(item.unit_price || 0).toFixed(2);
+
+        return qtyChanged || priceChanged;
+      })
+      .map((item) =>
+        billingService.updateItem(item.billing_item_id, {
+          quantity: Number(item.quantity || 0),
+          unit_price: Number(item.unit_price || 0),
+        })
+      );
+
+    const createdCalls = localNewItems.map((item) =>
+      billingService.addItem(billingId, {
+        product_id: Number(item.product_id),
+        quantity: Number(item.quantity || 0),
+        unit_price: Number(item.unit_price || 0),
+      })
+    );
+
+    await Promise.all([...removedCalls, ...updatedCalls, ...createdCalls]);
+
+    const refreshed = await loadBillingDetail(billingId, { silent: true });
+    draftServerSnapshotRef.current = clonePersistedItems(refreshed?.items || []);
+
+    return refreshed;
+  },
+  [loadBillingDetail]
+);
+
+const persistDraftChanges = useCallback(async () => {
+  const current = billingRef.current;
+  if (!current?.billing_id) return null;
+
+  await billingService.update(current.billing_id, {
+    customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
+    notes: notes || null,
+  });
+
+  lastSyncedHeaderRef.current = {
+    billingId: current.billing_id,
+    customerId: selectedCustomerId || null,
+    notes: notes || null,
+  };
+
+  const refreshed = await syncDraftItemsToServer(current.billing_id, current.items || []);
+  if (refreshed) mergeDraftPreview(refreshed);
+
+  return refreshed;
+}, [selectedCustomerId, notes, syncDraftItemsToServer, mergeDraftPreview]);
+
 
   loadStaticDataRef.current = loadStaticData;
   loadDraftsRef.current = loadDrafts;
   loadCustomersRef.current = loadCustomers;
   loadBillingDetailRef.current = loadBillingDetail;
 
-  /* =====================================================================
-     SELECTED CUSTOMER DETAIL LOAD
-     ===================================================================== */
+  const clearPersistedCartSession = useCallback(() => {
+    safeClearCart(cartStorageKeyRef.current);
+  }, []);
   useEffect(() => {
     let cancelled = false;
 
@@ -1217,6 +1314,7 @@ export default function CashierPosPage() {
 
   useEffect(() => {
     let cancelled = false;
+
     const run = async () => {
       if (!selectedCustomerId || !storeId) {
         setLoyaltyRule(null);
@@ -1232,20 +1330,12 @@ export default function CashierPosPage() {
         if (!cancelled) setLoyaltyRule(null);
       }
     };
+
     run();
     return () => {
       cancelled = true;
     };
   }, [selectedCustomerId, storeId]);
-
-  /* =====================================================================
-     EFFECTS
-     ===================================================================== */
-  useEffect(() => {
-    if (!success) return;
-    const timer = setTimeout(() => setSuccess(''), 3000);
-    return () => clearTimeout(timer);
-  }, [success]);
 
   useEffect(() => {
     if (activeCategory === 'all') return;
@@ -1257,41 +1347,60 @@ export default function CashierPosPage() {
     if (!stillVisible) setActiveCategory('all');
   }, [visibleCategories, activeCategory]);
 
-  /* ----- BOOTSTRAP ---------------------------------------------------- */
   useEffect(() => {
+    const key = cartStorageKeyRef.current;
+    if (!key) return;
+
+    const snapshot = buildPersistedCartSnapshot({
+      billing,
+      selectedCustomerId,
+      notes,
+      storeId,
+      userId: user?.user_id,
+    });
+
+    if (!snapshot?.billing?.items?.length) {
+      safeClearCart(key);
+      return;
+    }
+
+    safeSaveCart(key, snapshot);
+  }, [billing, selectedCustomerId, notes, storeId, user?.user_id]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     if (!storeId) return;
 
-    let cancelled = false;
-    const bootstrapId = ++bootstrapRequestId.current;
-
-    bootstrappedRef.current = false;
-    hydratedFromStorageRef.current = false;
-    setCatalogReady(false);
-
-    setError('');
-    setSuccess('');
-    setDrafts([]);
-    setCustomers([]);
-    setSearch('');
-    setDraftSearch('');
-    setActiveCategory('all');
-
-    resetSale();
-    resetProductState();
-    resetCategoryState();
-
     const bootstrap = async () => {
+      bootstrappedRef.current = false;
+      bootstrapProductsFetchedRef.current = false;
+      setCatalogReady(false);
+
+      setError('');
+      setSuccess('');
+      setDrafts([]);
+      setCustomers([]);
+      setSearch('');
+      setDraftSearch('');
+      setActiveCategory('all');
+
+      resetSale();
+      resetProductState();
+      resetCategoryState();
+
       try {
         setProductsLoading(true);
-        await loadStaticDataRef.current();
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-        const productsResponse = await productService.list({
 
+        await loadStaticDataRef.current();
+        if (cancelled) return;
+
+        const productsResponse = await productService.list({
           store_id: Number(storeId),
           page: 1,
           is_active: true,
         });
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
+        if (cancelled) return;
 
         productFiltersRef.current = {
           storeId: String(storeId || ''),
@@ -1320,65 +1429,42 @@ export default function CashierPosPage() {
         bootstrapProductsFetchedRef.current = true;
         lastProductFilterRef.current = JSON.stringify({
           storeId: String(storeId || ''),
-          categoryScope: 'all',         // effectiveCategoryScopeKey when activeCategory === 'all'
-          search: '',                   // debouncedSearch.toLowerCase() when search is empty
+          categoryScope: 'all',
+          search: '',
         });
 
-        bootstrappedRef.current = true;
-        setCatalogReady(true);
+        await Promise.all([
+          loadCustomersRef.current({ silent: true }),
+          loadDraftsRef.current({ silent: true }),
+        ]);
+        if (cancelled) return;
 
-        // 3) Set storage key
         const key = cartStorageKey(storeId, user?.user_id);
         cartStorageKeyRef.current = key;
 
-        // 4) Read saved cart into memory first
-        const saved = safeLoadCart(key);
+        const localSnapshot = safeLoadCart(key);
+        if (localSnapshot?.billing?.items?.length) {
+          setSelectedCustomerId(localSnapshot.selectedCustomerId || '');
+          setNotes(localSnapshot.notes || '');
 
-        // ✅ MOVE HERE — we've already read the cart so saving won't race against reading.
-        // Any item additions while customers/drafts load will now be persisted correctly.
-        hydratedFromStorageRef.current = true;
+          const restored = recalcBillingTotals({
+            ...buildEmptyLocalBilling(),
+            ...localSnapshot.billing,
+            billing_id: null,
+            invnumber: null,
+            __local: true,
+            items: clonePersistedItems(localSnapshot.billing.items || []),
+          });
 
-        // 5) Customers
-        await loadCustomersRef.current({ silent: true });
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-
-        // 6) Drafts
-        await loadDraftsRef.current({ silent: true });
-        if (cancelled || bootstrapId !== bootstrapRequestId.current) return;
-
-        // 7) Restore cart from localStorage
-        if (saved?.billing?.items?.length) {
-          if (
-            saved.billing.billing_id &&
-            saved.billing.is_draft !== false &&
-            saved.billing.status !== 'paid'
-          ) {
-            try {
-              await loadBillingDetailRef.current(saved.billing.billing_id, { silent: true });
-            } catch {
-              const restored = recalcBillingTotals({
-                ...buildEmptyLocalBilling(),
-                ...saved.billing,
-                billing_id: null,
-                __local: true,
-              });
-              setBilling(restored);
-              setSelectedCustomerId(saved.selectedCustomerId || '');
-              setNotes(saved.notes || '');
-            }
-          } else {
-            const restored = recalcBillingTotals({
-              ...buildEmptyLocalBilling(),
-              ...saved.billing,
-              __local: true,
-            });
-            setBilling(restored);
-            setSelectedCustomerId(saved.selectedCustomerId || '');
-            setNotes(saved.notes || '');
-          }
+          setBilling(restored);
         }
+
+        bootstrappedRef.current = true;
+        setCatalogReady(true);
       } catch (err) {
-        if (!cancelled) console.error('POS init failed:', err);
+        if (!cancelled) {
+          console.error('POS init failed:', err);
+        }
       } finally {
         if (!cancelled) setProductsLoading(false);
       }
@@ -1391,21 +1477,19 @@ export default function CashierPosPage() {
     };
   }, [storeId, user?.user_id, resetSale, resetProductState, resetCategoryState]);
 
-  /* ----- PRODUCTS RELOAD --------------------------------------------- */
   useEffect(() => {
     if (!storeId || !bootstrappedRef.current || !catalogReady) return;
 
-    // Bootstrap already loaded page 1 — skip this render, clear the flag
     if (bootstrapProductsFetchedRef.current) {
       bootstrapProductsFetchedRef.current = false;
-      lastProductFilterRef.current = currentFilterSignature; // ✅ sync signature NOW
+      lastProductFilterRef.current = currentFilterSignature;
       return;
     }
 
     const filtersChanged = lastProductFilterRef.current !== currentFilterSignature;
 
     if (!filtersChanged && currentPage === productPageInfo.currentPage) {
-      return; // ✅ nothing actually changed, don't re-fetch
+      return;
     }
 
     if (filtersChanged) {
@@ -1421,14 +1505,20 @@ export default function CashierPosPage() {
     }
 
     void loadProducts(currentPage);
-  }, [storeId, currentPage, currentFilterSignature, loadProducts, catalogReady, productPageInfo.currentPage]);
+  }, [
+    storeId,
+    currentPage,
+    currentFilterSignature,
+    loadProducts,
+    catalogReady,
+    productPageInfo.currentPage,
+  ]);
 
-  /* ----- PRODUCT PREFETCH -------------------------------------------- */
   useEffect(() => {
     if (!bootstrappedRef.current || !catalogReady) return;
     if (productsLoading) return;
     if (!productPageInfo.hasNextPage) return;
-    if (bootstrapProductsFetchedRef.current) return; // ✅ ADD THIS LINE
+    if (bootstrapProductsFetchedRef.current) return;
 
     void prefetchNextPage(productPageInfo.currentPage + 1);
   }, [
@@ -1439,9 +1529,6 @@ export default function CashierPosPage() {
     catalogReady,
   ]);
 
-  /* =====================================================================
-     BILLING MUTATIONS
-     ===================================================================== */
   const applyBillingMutation = useCallback((mutator) => {
     setBilling((prev) => {
       const base = prev || buildEmptyLocalBilling();
@@ -1456,32 +1543,14 @@ export default function CashierPosPage() {
       if (!billingItemId) return;
       setError('');
 
-      let removedItemSnapshot = null;
-
       applyBillingMutation((draft) => {
-        removedItemSnapshot = draft.items.find(
-          (it) => String(it.billing_item_id) === String(billingItemId)
-        );
         draft.items = draft.items.filter(
           (it) => String(it.billing_item_id) !== String(billingItemId)
         );
         return draft;
       });
-
-      const current = billingRef.current;
-      if (!current?.billing_id || !removedItemSnapshot || removedItemSnapshot.__local) return;
-
-      enqueueSync(async () => {
-        try {
-          await billingService.removeItem(billingItemId);
-        } catch (err) {
-          setError(
-            err?.response?.data?.message || err?.message || 'Background sync failed (remove).'
-          );
-        }
-      });
     },
-    [applyBillingMutation, enqueueSync]
+    [applyBillingMutation]
   );
 
   const updateItemQuantity = useCallback(
@@ -1503,27 +1572,16 @@ export default function CashierPosPage() {
           target.unit_price,
           target.vat_rate ?? DEFAULT_VAT_RATE
         );
-        Object.assign(target, { quantity: nextQuantity, ...totals });
+
+        Object.assign(target, {
+          quantity: nextQuantity,
+          ...totals,
+        });
+
         return draft;
       });
-
-      const current = billingRef.current;
-      if (!current?.billing_id || item.__local) return;
-
-      enqueueSync(async () => {
-        try {
-          await billingService.updateItem(item.billing_item_id, {
-            quantity: nextQuantity,
-            unit_price: item.unit_price,
-          });
-        } catch (err) {
-          setError(
-            err?.response?.data?.message || err?.message || 'Background sync failed (quantity).'
-          );
-        }
-      });
     },
-    [applyBillingMutation, enqueueSync, removeItem]
+    [applyBillingMutation, removeItem]
   );
 
   useEffect(() => {
@@ -1550,77 +1608,31 @@ export default function CashierPosPage() {
       if (!product?.product_id) return;
       setError('');
 
-      let wasIncrement = false;
-      let optimisticItemId = null;
-
       applyBillingMutation((draft) => {
         const existing = draft.items.find(
           (it) => String(it.product_id) === String(product.product_id)
         );
 
         if (existing) {
-          wasIncrement = true;
-          optimisticItemId = existing.billing_item_id;
           const newQty = Number(existing.quantity || 0) + 1;
           const totals = calcLineFromGross(
             newQty,
             existing.unit_price,
             existing.vat_rate ?? product.vat_rate ?? DEFAULT_VAT_RATE
           );
-          Object.assign(existing, { quantity: newQty, ...totals });
+
+          Object.assign(existing, {
+            quantity: newQty,
+            ...totals,
+          });
         } else {
-          const local = buildLocalItem(product, 1);
-          optimisticItemId = local.billing_item_id;
-          draft.items.push(local);
+          draft.items.push(buildLocalItem(product, 1));
         }
 
         return draft;
       });
-
-      const current = billingRef.current;
-      if (!current?.billing_id) return;
-
-      enqueueSync(async () => {
-        try {
-          if (wasIncrement) {
-            const liveItem = (billingRef.current?.items || []).find(
-              (it) => String(it.billing_item_id) === String(optimisticItemId)
-            );
-            if (!liveItem || liveItem.__local) return;
-
-            await billingService.updateItem(liveItem.billing_item_id, {
-              quantity: liveItem.quantity,
-              unit_price: liveItem.unit_price,
-            });
-          } else {
-            const created = await billingService.addItem(current.billing_id, {
-              product_id: product.product_id,
-              quantity: 1,
-              unit_price: product.price,
-            });
-
-            const serverItem = created?.data || created;
-
-            if (serverItem?.billing_item_id) {
-              setBilling((prev) => {
-                if (!prev) return prev;
-
-                const items = (prev.items || []).map((it) =>
-                  String(it.billing_item_id) === String(optimisticItemId)
-                    ? { ...it, billing_item_id: serverItem.billing_item_id, __local: false }
-                    : it
-                );
-
-                return recalcBillingTotals({ ...prev, items });
-              });
-            }
-          }
-        } catch (err) {
-          setError(err?.response?.data?.message || err?.message || 'Background sync failed (add).');
-        }
-      });
     },
-    [applyBillingMutation, enqueueSync]
+    [applyBillingMutation]
   );
 
   const handlePayNow = useCallback(
@@ -1641,27 +1653,22 @@ export default function CashierPosPage() {
     [updateItemQuantity]
   );
 
-  /* =====================================================================
-     DRAFT PROMOTION / PAYMENT
-     ===================================================================== */
   const promoteLocalCartToServerDraft = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.items?.length) return null;
     if (current.billing_id) return current;
-
-    await syncQueueRef.current.catch(() => { });
 
     const createdRes = await billingService.createDraft({
       store_id: Number(storeId),
       customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
       notes: notes || null,
     });
+
     const created = createdRes?.data || createdRes;
     const newId = created.billing_id;
 
-    const snapshot = [...(current.items || [])];
-    await Promise.allSettled(
-      snapshot.map((it) =>
+    await Promise.all(
+      (current.items || []).map((it) =>
         billingService.addItem(newId, {
           product_id: it.product_id,
           quantity: it.quantity,
@@ -1674,27 +1681,23 @@ export default function CashierPosPage() {
     return detail || created;
   }, [storeId, selectedCustomerId, notes, loadBillingDetail]);
 
-  const lastSyncedHeaderRef = useRef({ customerId: null, notes: null, billingId: null });
-
   const persistDraftHeader = useCallback(async () => {
     const current = billingRef.current;
     if (!current?.billing_id) return null;
 
-    // Skip the update call if nothing on the header actually changed
     const last = lastSyncedHeaderRef.current;
     const headerUnchanged =
       last.billingId === current.billing_id &&
       last.customerId === (selectedCustomerId || null) &&
       last.notes === (notes || null);
 
-    if (headerUnchanged) {
-      return current; // nothing to sync, return immediately
-    }
+    if (headerUnchanged) return current;
 
     await billingService.update(current.billing_id, {
       customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
       notes: notes || null,
     });
+
     lastSyncedHeaderRef.current = {
       billingId: current.billing_id,
       customerId: selectedCustomerId || null,
@@ -1706,135 +1709,184 @@ export default function CashierPosPage() {
     return updatedBilling;
   }, [selectedCustomerId, notes, loadBillingDetail, mergeDraftPreview]);
 
-  const handleSaveOrUpdateDraft = useCallback(async () => {
-    const current = billingRef.current;
-    if (!current?.items?.length) return;
+const handleSaveOrUpdateDraft = useCallback(async () => {
+  const current = billingRef.current;
+  if (!current?.items?.length) return;
+
+  setError('');
+  setSuccess('');
+  setSubmitting(true);
+
+  try {
+    let finalBilling;
+
+    if (!current.billing_id) {
+      finalBilling = await promoteLocalCartToServerDraft();
+    } else {
+      finalBilling = await persistDraftChanges();
+    }
+
+    if (finalBilling) {
+      mergeDraftPreview(finalBilling);
+    }
+
+    setSuccess(
+      finalBilling?.billing_id
+        ? `Draft #${finalBilling.billing_id} saved successfully.`
+        : 'Draft saved successfully.'
+    );
+
+    resetSale();
+    clearPersistedCartSession();
+    void loadDrafts({ silent: true });
+  } catch (err) {
+    setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
+  } finally {
+    setSubmitting(false);
+  }
+}, [
+  mergeDraftPreview,
+  persistDraftChanges,
+  promoteLocalCartToServerDraft,
+  resetSale,
+  clearPersistedCartSession,
+  loadDrafts,
+]);
+
+  const handleProceedToPayment = useCallback(() => {
     setError('');
+    setIsPreparingPayment(false);
+    setShowPaymentModal(true);
+  }, []);
+
+const handleCharge = useCallback(
+  async (paymentDetails) => {
+    const current = billingRef.current;
+
+    if (!current?.items?.length && !isBalanceSettlement) return;
+
+    if (current?.status === 'paid') {
+      setShowPaymentModal(false);
+      return;
+    }
+
+    setSubmitting(true);
     setSuccess('');
-    setSubmitting(true);
-
-    try {
-      let finalBilling;
-      if (!current.billing_id) {
-        finalBilling = await promoteLocalCartToServerDraft();
-      } else {
-        finalBilling = await persistDraftHeader();
-      }
-
-      if (finalBilling) mergeDraftPreview(finalBilling);
-
-      setSuccess(
-        finalBilling?.billing_id
-          ? `Draft #${finalBilling.billing_id} saved successfully.`
-          : 'Draft saved successfully.'
-      );
-      resetSale();
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
-    } finally {
-      setSubmitting(false);
-    }
-  }, [mergeDraftPreview, persistDraftHeader, promoteLocalCartToServerDraft, resetSale]);
-
-  const handleProceedToPayment = useCallback(async () => {
-    const current = billingRef.current;
-    if (!current?.items?.length) return;
     setError('');
-    setSubmitting(true);
 
     try {
-      if (!current.billing_id) await promoteLocalCartToServerDraft();
-      else await persistDraftHeader();
-      setShowPaymentModal(true);
-      setSubmitting(true);
-      if (!current.billing_id) {
-        await promoteLocalCartToServerDraft();
-      } else {
-        await persistDraftHeader();
+      let paidBilling = null;
+
+      const paymentPayload = {
+        payment_method: paymentDetails.paymentMethod,
+        amount_received: paymentDetails.amountReceived,
+        amount_tendered: paymentDetails.amountTendered,
+        points_redeemed: paymentDetails.pointsToRedeem,
+        mpesa_phone: paymentDetails.mpesaPhone,
+        mpesa_code: paymentDetails.mpesaCode,
+        card_reference: paymentDetails.cardReference,
+        card_holder: paymentDetails.cardHolder,
+      };
+
+      // 1. Existing balance settlement
+      if (isBalanceSettlement && current?.billing_id) {
+        await billingService.chargeExisting(current.billing_id, paymentPayload);
+
+        const paidResponse = await billingService.show(current.billing_id);
+        paidBilling = paidResponse?.data || paidResponse;
       }
+      // 2. Loaded server draft -> sync draft first, then charge existing billing
+      else if (current?.billing_id) {
+        await persistDraftChanges();
+        await billingService.chargeExisting(current.billing_id, paymentPayload);
+
+        const paidResponse = await billingService.show(current.billing_id);
+        paidBilling = paidResponse?.data || paidResponse;
+      }
+      // 3. Pure local cart -> atomic one-shot checkout
+      else {
+        const payload = {
+          store_id: Number(storeId),
+          customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
+          notes: notes || null,
+          items: (current.items || []).map((item) => ({
+            product_id: Number(item.product_id),
+            quantity: Number(item.quantity || 0),
+            price: Number(item.unit_price || 0),
+            vat_rate: Number(item.vat_rate ?? DEFAULT_VAT_RATE),
+          })),
+          payment: {
+            method: paymentDetails.paymentMethod,
+            amount_received: paymentDetails.amountReceived,
+            amount_tendered: paymentDetails.amountTendered,
+            points_redeemed: paymentDetails.pointsToRedeem,
+            mpesa_phone: paymentDetails.mpesaPhone,
+            mpesa_code: paymentDetails.mpesaCode,
+            card_reference: paymentDetails.cardReference,
+            card_holder: paymentDetails.cardHolder,
+          },
+        };
+
+        const response = await billingService.charge(payload);
+
+        paidBilling =
+          response?.data?.billing ||
+          response?.billing ||
+          response?.data?.invoice ||
+          response?.invoice ||
+          null;
+      }
+
+      if (!paidBilling) {
+        throw new Error('Paid billing response was not returned by server.');
+      }
+
+      const printMode =
+        Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
+
+      openBillingPrint(
+        { ...paidBilling, store: paidBilling.store || currentStore },
+        currentStore,
+        printMode,
+        printSettings
+      );
+
+      if (paidBilling?.billing_id) {
+        removeDraftPreview(paidBilling.billing_id);
+      }
+
+      resetSale();
+      clearPersistedCartSession();
+      setPointsToRedeem(0);
+      setShowPaymentModal(false);
+      setIsBalanceSettlement(false);
+      setSuccess('Payment processed successfully.');
+      focusSearchInput(true);
+
+      void loadDrafts({ silent: true });
     } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to open payment.');
+      throw new Error(
+        err?.response?.data?.message || err?.message || 'Unable to process payment.'
+      );
     } finally {
       setSubmitting(false);
     }
-  }, [persistDraftHeader, promoteLocalCartToServerDraft]);
-
-  const handleCharge = useCallback(
-    async (paymentDetails) => {
-      const current = billingRef.current;
-
-      // Allow balance-settlement path (billing exists on server, no new items in session)
-      // Block only when there's truly nothing to charge against
-      if (!current?.billing_id && !current?.items?.length) return;
-
-      if (current.status === 'paid') {
-        setShowPaymentModal(false);
-        return;
-      }
-
-      setSubmitting(true);
-      setSuccess('');
-
-      try {
-        let target = current;
-
-        if (!current.billing_id) {
-          // Local cart with items — promote to server draft first
-          target = await promoteLocalCartToServerDraft();
-        } else if (current.items?.length) {
-          // Server billing with items — persist any header changes
-          target = (await persistDraftHeader()) || current;
-        }
-        // else: balance-only settlement — billing_id already exists,
-        // no items to sync, use current as-is
-
-        await billingService.charge(target.billing_id, {
-          payment_method: paymentDetails.paymentMethod,
-          amount_received: paymentDetails.amountReceived,
-          amount_tendered: paymentDetails.amountTendered,
-          points_redeemed: paymentDetails.pointsToRedeem,
-          mpesa_phone: paymentDetails.mpesaPhone,
-          mpesa_code: paymentDetails.mpesaCode,
-          card_reference: paymentDetails.cardReference,
-          card_holder: paymentDetails.cardHolder,
-        });
-
-        const paidResponse = await billingService.show(target.billing_id);
-        const paidBilling = paidResponse?.data || paidResponse;
-        const printMode = Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
-
-        openBillingPrint(
-          { ...paidBilling, store: paidBilling.store || currentStore },
-          currentStore,
-          printMode,
-          printSettings
-        );
-
-        removeDraftPreview(target.billing_id);
-        safeClearCart(cartStorageKeyRef.current);
-        resetSale();
-        setPointsToRedeem(0);
-        setShowPaymentModal(false);
-        setSuccess('Payment processed successfully.');
-        focusSearchInput(true);
-      } catch (err) {
-        throw new Error(
-          err?.response?.data?.message || err?.message || 'Unable to process payment.'
-        );
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [
-      currentStore,
-      focusSearchInput,
-      persistDraftHeader,
-      printSettings,
-      promoteLocalCartToServerDraft,
-      removeDraftPreview,
-      resetSale,
-    ]
-  );
+  },
+  [
+    clearPersistedCartSession,
+    currentStore,
+    focusSearchInput,
+    isBalanceSettlement,
+    notes,
+    persistDraftChanges,
+    printSettings,
+    removeDraftPreview,
+    resetSale,
+    selectedCustomerId,
+    storeId,
+    loadDrafts,
+  ]
+);
 
   const handleLoadDraft = useCallback(
     async (draftId) => {
@@ -1867,7 +1919,10 @@ export default function CashierPosPage() {
       try {
         await deleteBillingRecord(draftId);
         const current = billingRef.current;
-        if (String(current?.billing_id) === String(draftId)) resetSale();
+        if (String(current?.billing_id) === String(draftId)) {
+          resetSale();
+          clearPersistedCartSession();
+        }
         removeDraftPreview(draftId);
       } catch (err) {
         setError(err?.response?.data?.message || err?.message || 'Unable to delete draft.');
@@ -1875,8 +1930,9 @@ export default function CashierPosPage() {
         setSubmitting(false);
       }
     },
-    [deleteBillingRecord, removeDraftPreview, resetSale]
+    [deleteBillingRecord, removeDraftPreview, resetSale, clearPersistedCartSession]
   );
+
   const handleSettleBalance = useCallback(async () => {
     if (!selectedCustomerId) return;
 
@@ -1893,7 +1949,6 @@ export default function CashierPosPage() {
       });
 
       const billings = extractList(response);
-
       if (!billings.length) {
         setError('No outstanding balance found for this customer.');
         return;
@@ -1917,7 +1972,9 @@ export default function CashierPosPage() {
       setIsBalanceSettlement(true);
       setShowPaymentModal(true);
     } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Unable to load outstanding balance.');
+      setError(
+        err?.response?.data?.message || err?.message || 'Unable to load outstanding balance.'
+      );
     } finally {
       setSubmitting(false);
     }
@@ -1965,11 +2022,12 @@ export default function CashierPosPage() {
     setSubmitting(true);
 
     try {
-      if (current?.billing_id) {
+      if (current?.billing_id && current?.is_draft) {
         await deleteBillingRecord(current.billing_id);
         removeDraftPreview(current.billing_id);
       }
       resetSale();
+      clearPersistedCartSession();
       setSearch('');
       focusSearchInput(true);
     } catch (err) {
@@ -1982,6 +2040,7 @@ export default function CashierPosPage() {
     focusSearchInput,
     removeDraftPreview,
     resetSale,
+    clearPersistedCartSession,
     search,
     showCustomerModal,
     showDraftModal,
@@ -1993,46 +2052,52 @@ export default function CashierPosPage() {
     if (!chapa5Preview?.claimable_free_items || !chapa5Preview?.product_sku) return;
 
     const itemsToAdd = chapa5Preview.claimable_free_items;
-
     setError('');
-    setSubmitting(true);
 
-    try {
-      const freeProduct = products.find(
-        (p) => p.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+    const freeProduct = products.find(
+      (p) => p.sku?.toLowerCase() === chapa5Preview.product_sku?.toLowerCase()
+    );
+    if (!freeProduct) {
+      setError('Free item product not found in catalog.');
+      return;
+    }
+
+    setChapa5ClaimedQty((prev) => prev + itemsToAdd);
+
+    applyBillingMutation((draft) => {
+      const existing = draft.items.find(
+        (it) =>
+          String(it.product_id) === String(freeProduct.product_id) && Number(it.unit_price) <= 0
       );
 
-      if (!freeProduct) {
-        setError('Free item product not found in catalog.');
-        return;
-      }
-
-      let target = billingRef.current;
-      if (!target?.billing_id) {
-        target = await promoteLocalCartToServerDraft();
+      if (existing) {
+        const newQty = Number(existing.quantity || 0) + itemsToAdd;
+        const totals = calcLineFromGross(newQty, 0, existing.vat_rate ?? DEFAULT_VAT_RATE);
+        Object.assign(existing, { quantity: newQty, ...totals });
       } else {
-        target = (await persistDraftHeader()) || target;
+        const local = buildLocalItem(freeProduct, itemsToAdd, { unit_price: 0 });
+        draft.items.push(local);
       }
+      return draft;
+    });
 
-      if (!target?.billing_id) {
-        setError('Unable to save cart before claiming reward.');
-        return;
-      }
+    const current = billingRef.current;
+    if (!current?.billing_id) return;
 
-      await billingService.addItem(target.billing_id, {
+    setSubmitting(true);
+    try {
+      await billingService.addItem(current.billing_id, {
         product_id: freeProduct.product_id,
         quantity: itemsToAdd,
         unit_price: 0,
       });
-
-      setChapa5ClaimedQty((prev) => prev + itemsToAdd);
-      await loadBillingDetail(target.billing_id, { silent: true });
+      await loadBillingDetail(current.billing_id, { silent: true });
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Failed to add free item.');
     } finally {
       setSubmitting(false);
     }
-  }, [chapa5Preview, products, promoteLocalCartToServerDraft, persistDraftHeader, loadBillingDetail]);
+  }, [chapa5Preview, products, applyBillingMutation, loadBillingDetail]);
 
   hotkeyContextRef.current = {
     submitting,
@@ -2089,51 +2154,6 @@ export default function CashierPosPage() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [focusSearchInput]);
 
-  /* =====================================================================
-     DERIVED RENDER VALUES
-     ===================================================================== */
-  const itemCount = useMemo(
-    () => billing?.items?.reduce((sum, item) => sum + Number(item.quantity || 0), 0) || 0,
-    [billing?.items]
-  );
-
-  const filteredDrafts = useMemo(() => {
-    const keyword = draftSearch.trim().toLowerCase();
-    if (!keyword) return drafts;
-
-    return drafts.filter((draft) => {
-      const haystack = [
-        draft?.invnumber,
-        `Draft #${draft?.billing_id || ''}`,
-        draft?.customer?.full_name,
-        draft?.customer?.phone,
-        draft?.customer?.email,
-        draft?.notes,
-        String(draft?.total || ''),
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-
-      return haystack.includes(keyword);
-    });
-  }, [drafts, draftSearch]);
-
-  const customerCurrentBalance = useMemo(
-    () =>
-      Number(
-        billing?.customer?.current_balance ??
-        selectedCustomer?.current_balance ??
-        selectedCustomer?.balance ??
-        selectedCustomer?.opening_balance ??
-        0
-      ),
-    [billing?.customer, selectedCustomer]
-  );
-
-  /* =====================================================================
-     PAGINATION HANDLERS
-     ===================================================================== */
   const goToPreviousPage = useCallback(() => {
     if (productsLoading) return;
     const prevPage = productPageInfo.currentPage - 1;
@@ -2158,9 +2178,6 @@ export default function CashierPosPage() {
     await loadCategoriesPage(categoryPageInfo.currentPage + 1);
   }, [canNextCategory, categoriesLoading, loadCategoriesPage, categoryPageInfo.currentPage]);
 
-  /* =====================================================================
-     EARLY RETURNS
-     ===================================================================== */
   if (!stores.length) {
     return (
       <section className="pos-grid cashier-pos-page">
@@ -2172,9 +2189,7 @@ export default function CashierPosPage() {
             </div>
           </div>
           <div className="card">
-            <p>
-              <strong>No stores assigned</strong>
-            </p>
+            <p><strong>No stores assigned</strong></p>
             <p className="muted" style={{ marginTop: 8 }}>
               Your account does not have any store assigned. Please contact your administrator.
             </p>
@@ -2223,13 +2238,20 @@ export default function CashierPosPage() {
                   className="icon-button"
                   onClick={() => setSearch('')}
                   title="Clear search"
-                  style={{ width: 28, height: 28, border: 'none', background: 'transparent', color: 'var(--muted)', flexShrink: 0 }}
+                  style={{
+                    width: 28,
+                    height: 28,
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--muted)',
+                    flexShrink: 0,
+                  }}
                 >
                   ×
                 </button>
               )}
             </div>
-            {/* ← ADD THIS */}
+
             <div className="view-toggle">
               <button
                 type="button"
@@ -2249,11 +2271,7 @@ export default function CashierPosPage() {
               </button>
             </div>
 
-
-            <div
-              className="chips-row"
-              style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
-            >
+            <div className="chips-row" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {!categorySearch && (
                 <button
                   type="button"
@@ -2305,6 +2323,7 @@ export default function CashierPosPage() {
                   <ChevronRight size={14} />
                 </button>
               )}
+
               <div className="category-search-wrap">
                 <button
                   type="button"
@@ -2313,7 +2332,6 @@ export default function CashierPosPage() {
                     if (categorySearch) {
                       setCategorySearch('');
                     } else {
-                      // focus the hidden input after state update
                       window.requestAnimationFrame(() => {
                         document.getElementById('category-search-input')?.focus();
                       });
@@ -2324,6 +2342,7 @@ export default function CashierPosPage() {
                 >
                   <Search size={15} />
                 </button>
+
                 {categorySearchOpen && (
                   <div className="category-search-popout">
                     <input
@@ -2352,19 +2371,6 @@ export default function CashierPosPage() {
                   </div>
                 )}
               </div>
-              {/* 
-              {categoryPageInfo.total > 0 && (
-                <span
-                  className="muted"
-                  style={{ fontSize: 12, marginLeft: 4 }}
-                  aria-live="polite"
-                >
-                  {categoryPageInfo.currentPage}/{categoryPageInfo.lastPage}
-                  <span style={{ marginLeft: 6, opacity: 0.8 }}>
-                    {categoryPageInfo.total}
-                  </span>
-                </span>
-              )} */}
             </div>
           </div>
 
@@ -2379,11 +2385,6 @@ export default function CashierPosPage() {
             <>
               {error ? <div className="form-error">{error}</div> : null}
               {success ? <div className="form-success">{success}</div> : null}
-              {/* {productsLoading && products.length ? (
-  <div className="inline-note-spinner">
-    <div className="spinner spinner--sm" />
-  </div>
-) : null} */}
 
               <VirtualizedProductGrid
                 products={products}
@@ -2401,9 +2402,8 @@ export default function CashierPosPage() {
               {products.length > 0 ? (
                 <div className="pagination-bar">
                   <div className="pagination-summary">
-                    Showing <strong>{productPageInfo.from}</strong> -{' '}
-                    <strong>{productPageInfo.to}</strong> of{' '}
-                    <strong>{productPageInfo.total}</strong> products
+                    Showing <strong>{productPageInfo.from}</strong> - <strong>{productPageInfo.to}</strong>{' '}
+                    of <strong>{productPageInfo.total}</strong> products
                     <span style={{ marginLeft: 8, opacity: 0.7 }}>
                       ({productPageInfo.perPage} per page)
                     </span>
@@ -2428,7 +2428,9 @@ export default function CashierPosPage() {
                       type="button"
                       className="ghost-button pagination-btn"
                       onClick={goToNextPage}
-                      disabled={productPageInfo.currentPage >= productPageInfo.lastPage || productsLoading}
+                      disabled={
+                        productPageInfo.currentPage >= productPageInfo.lastPage || productsLoading
+                      }
                     >
                       Next
                     </button>
@@ -2447,7 +2449,7 @@ export default function CashierPosPage() {
                 <p className="invoice-subtext">
                   {billing
                     ? billing.invnumber ||
-                    (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
                     : 'No active billing yet'}
                 </p>
               </div>
@@ -2462,10 +2464,7 @@ export default function CashierPosPage() {
                 <div className="selected-customer-box">
                   <div className="customer-meta">
                     <span className="meta-label">Customer</span>
-                    <strong>
-                      {selectedCustomer?.full_name ||
-                        (selectedCustomerId ? 'Loading...' : 'Customer')}
-                    </strong>
+                    <strong>{selectedCustomer?.full_name || 'Loading...'}</strong>
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button
@@ -2522,6 +2521,7 @@ export default function CashierPosPage() {
                   </div>
                 </div>
               )}
+
               {draftsLoading && <span className="inline-note-spinner">Refreshing drafts...</span>}
             </div>
           </div>
@@ -2552,6 +2552,7 @@ export default function CashierPosPage() {
                     <FolderClock size={16} />
                   </button>
                 )}
+
                 <button
                   type="button"
                   className="ghost-button"
@@ -2659,7 +2660,7 @@ export default function CashierPosPage() {
                   </span>
                 </div>
 
-                <div className="summary-divider"></div>
+                <div className="summary-divider" />
 
                 <div className="summary-row total-accent-row">
                   <span className="total-label">Total Amount</span>
@@ -2687,7 +2688,11 @@ export default function CashierPosPage() {
                   className="primary-button"
                   disabled={submitting}
                   onClick={handleSettleBalance}
-                  style={{ width: '100%', justifyContent: 'center', background: 'var(--hero-teal-1)' }}
+                  style={{
+                    width: '100%',
+                    justifyContent: 'center',
+                    background: 'var(--hero-teal-1)',
+                  }}
                 >
                   Settle Balance ({currency(selectedCustomer.current_balance, currentStore?.currency)})
                 </button>
@@ -2728,6 +2733,7 @@ export default function CashierPosPage() {
         onClaimChapa5Reward={handleClaimChapa5Reward}
         loyaltyMinPoints={loyaltyRule?.active_rule?.min_points ?? 0}
         isBalanceSettlement={isBalanceSettlement}
+        isPreparingPayment={isPreparingPayment}
       />
 
       <DraftModal

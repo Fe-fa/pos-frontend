@@ -25,6 +25,8 @@ import AdminCashiersPage from '../pages/admin/AdminCashiersPage';
 import ManagerDashboardPage from '../pages/admin/ManagerDashboardPage';
 import { ROUTE_PERMISSIONS } from '../config/routePermissions';
 import AdminPaymentsPage from '../pages/admin/AdminPaymentsPage';
+import VerifyEmailPage from '../pages/auth/VerifyEmailPage';
+
 
 
 function RootRedirect() {
@@ -58,6 +60,7 @@ export default function AppRouter() {
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
 
       <Route element={<ProtectedRoute allowedRoles={['cashier']} />}>
         <Route path="/pending-approval" element={<PendingApprovalPage />} />

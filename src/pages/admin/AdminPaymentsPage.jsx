@@ -26,6 +26,9 @@ import { useStore } from '../../contexts/StoreContext';
 import { paymentService } from '../../services/paymentService';
 import { currency, formatDateTime } from '../../utils/helpers';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { billingService } from '../../services/billingService';
+import { categoryService } from '../../services/categoryService';
+import { extractPaginated } from '../../utils/pagination';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 const CARD_METHODS = ['card', 'visa', 'mastercard', 'pos'];
@@ -388,9 +391,12 @@ const LOCAL_PAGE_STYLES = `
     grid-template-columns: 1fr;
   }
 
-  .payments-filter-grid {
-    grid-template-columns: 1fr 1fr;
-  }
+.payments-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.3fr) repeat(5, minmax(0, 160px)); /* ✅ was 3 */
+  gap: 12px;
+  align-items: center;
+}
 
   .payments-trace-grid,
   .payments-modal-grid {
@@ -765,6 +771,10 @@ export default function AdminPaymentsPage() {
   const [expandedPaymentId, setExpandedPaymentId] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [cashierFilter, setCashierFilter] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [allCashiers, setAllCashiers] = useState([]);
+  const [allCategories, setAllCategories] = useState([]);
 
   const debouncedSearch = useDebouncedValue(search.trim(), 300);
 
@@ -812,6 +822,8 @@ export default function AdminPaymentsPage() {
       method: targetMethod,
       dateFrom: targetDateFrom,
       dateTo: targetDateTo,
+      cashierId: targetCashierId,   // ✅ add
+      categoryId: targetCategoryId, // ✅ add
     }) => {
       if (!targetStoreId) {
         dispatch({
@@ -835,6 +847,8 @@ export default function AdminPaymentsPage() {
           ...(targetMethod ? { payment_method: targetMethod } : {}),
           ...(targetDateFrom ? { date_from: targetDateFrom } : {}),
           ...(targetDateTo ? { date_to: targetDateTo } : {}),
+                ...(targetCashierId ? { user_id: targetCashierId } : {}),    // ✅ add
+      ...(targetCategoryId ? { category_id: targetCategoryId } : {}), // ✅ add
         });
 
         const payload = response ?? {};
@@ -880,6 +894,8 @@ export default function AdminPaymentsPage() {
         method: params.method ?? method,
         dateFrom: params.dateFrom ?? activeRange.from,
         dateTo: params.dateTo ?? activeRange.to,
+        cashierId: params.cashierId ?? cashierFilter,    // ✅ add
+        categoryId: params.categoryId ?? categoryFilter, // ✅ add
       };
 
       if (inFlightRef.current) {
@@ -913,6 +929,8 @@ export default function AdminPaymentsPage() {
       method,
       activeRange.from,
       activeRange.to,
+      cashierFilter,   // ✅ add
+      categoryFilter,  // ✅ add
       runLoadPayments,
     ]
   );
@@ -939,6 +957,8 @@ export default function AdminPaymentsPage() {
       method,
       dateFrom: activeRange.from,
       dateTo: activeRange.to,
+      cashierId: cashierFilter,   // ✅ add
+      categoryId: categoryFilter, // ✅ add
     });
   }, [
     storeId,
@@ -949,8 +969,43 @@ export default function AdminPaymentsPage() {
     debouncedSearch,
     activeRange.from,
     activeRange.to,
+    cashierFilter,   // ✅ add
+    categoryFilter,  // ✅ add
     loadPayments,
   ]);
+    useEffect(() => {
+    if (!storeId) {
+      setAllCashiers([]);
+      setAllCategories([]);
+      return;
+    }
+
+    billingService.list({ store_id: storeId, per_page: 1000 })
+      .then((response) => {
+        const rows = extractPaginated(response, 1000).data || [];
+        const map = new Map();
+        rows.forEach((b) => {
+          if (!b?.user?.user_id) return;
+          const full = `${b.user.first_name || ''} ${b.user.last_name || ''}`.trim();
+          map.set(String(b.user.user_id), {
+            value: String(b.user.user_id),
+            label: full || b.user.email || `User ${b.user.user_id}`,
+          });
+        });
+        setAllCashiers(Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label)));
+      })
+      .catch(() => {});
+
+    categoryService.list({ store_id: storeId })
+      .then((response) => {
+        const rows = response?.data || response || [];
+        setAllCategories(
+          rows.map((c) => ({ value: String(c.category_id), label: c.category_name }))
+              .sort((a, b) => a.label.localeCompare(b.label))
+        );
+      })
+      .catch(() => {});
+  }, [storeId]);
 
   const handleRefresh = useCallback(() => {
     loadPayments({
@@ -1547,6 +1602,35 @@ const responseMeta = payload?.meta || {};
                       <option value="mpesa">M-Pesa</option>
                       <option value="bank">Bank</option>
                       <option value="wallet">Wallet</option>
+                    </select>
+                  </label>
+                                    <label>
+                    <span className="muted">Cashier</span>
+                    <select
+                      className="select-input"
+                      value={cashierFilter}
+                      onChange={(e) => { setCashierFilter(e.target.value); dispatch({ type: 'SET_PAGE', payload: 1 }); }}
+                      disabled={!storeId}
+                    >
+                      <option value="">All cashiers</option>
+                      {allCashiers.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span className="muted">Category</span>
+                    <select
+                      className="select-input"
+                      value={categoryFilter}
+                      onChange={(e) => { setCategoryFilter(e.target.value); dispatch({ type: 'SET_PAGE', payload: 1 }); }}
+                      disabled={!storeId}
+                    >
+                      <option value="">All categories</option>
+                      {allCategories.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
                     </select>
                   </label>
 

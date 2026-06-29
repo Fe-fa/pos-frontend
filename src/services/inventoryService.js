@@ -38,6 +38,14 @@ export const inventoryService = {
     return response.data;
   },
 
+  // ── NEW: signed delta adjustment — hits its own endpoint with its own validation ──
+  async adjust(inventoryId, payload, config = {}) {
+    const response = await api.patch(`/inventory/${inventoryId}/adjust`, payload, {
+      signal: config.signal,
+    });
+    return response.data;
+  },
+
   async remove(inventoryId, config = {}) {
     const response = await api.delete(`/inventory/${inventoryId}`, {
       signal: config.signal,

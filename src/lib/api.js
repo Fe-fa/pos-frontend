@@ -5,6 +5,7 @@ export const storageKeys = {
   user: 'swiftpos_user',
   storeId: 'swiftpos_store_id',
   theme: 'swiftpos_theme',
+  pendingVerification: 'swiftpos_pending_verification',
 };
 
 const api = axios.create({
@@ -15,7 +16,6 @@ const api = axios.create({
   },
 });
 
-// ─── Token Refresh State ───────────────────────────────────────────────────
 let isRefreshing = false;
 let failedQueue = [];
 
@@ -30,10 +30,10 @@ const forceLogout = () => {
   localStorage.removeItem(storageKeys.token);
   localStorage.removeItem(storageKeys.user);
   localStorage.removeItem(storageKeys.storeId);
+  localStorage.removeItem(storageKeys.pendingVerification);
   window.dispatchEvent(new Event('auth:logout'));
 };
 
-// ─── Request Interceptor ───────────────────────────────────────────────────
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem(storageKeys.token);
   const storeId = localStorage.getItem(storageKeys.storeId);
@@ -51,11 +51,9 @@ api.interceptors.request.use((config) => {
   return config;
 }, (error) => Promise.reject(error));
 
-// ─── Response Interceptor ──────────────────────────────────────────────────
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    // Ignore intentional request cancellations (TanStack Query, unmounts, etc.)
     if (
       axios.isCancel(error) ||
       error.code === 'ERR_CANCELED' ||
@@ -67,16 +65,16 @@ api.interceptors.response.use(
     const original = error.config;
     const status = error.response?.status;
 
-    // ── Auto-refresh on 401 ──────────────────────────────────────────────
     if (
       status === 401 &&
-      !original._retry &&                          // don't retry twice
-      !original.url?.includes('/auth/refresh') &&  // refresh itself failed → logout
-      !original.url?.includes('/auth/login')       // bad credentials → let form handle it
+      !original._retry &&
+      !original.url?.includes('/auth/refresh') &&
+      !original.url?.includes('/auth/login') &&
+      !original.url?.includes('/auth/verify-email') &&
+      !original.url?.includes('/auth/resend-verification')
     ) {
       original._retry = true;
 
-      // If a refresh is already in-flight, queue this request
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
@@ -91,7 +89,7 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const { data } = await api.post('/auth/refresh'); // uses current token from request interceptor
+        const { data } = await api.post('/auth/refresh');
         const newToken = data.access_token;
 
         localStorage.setItem(storageKeys.token, newToken);
@@ -99,38 +97,22 @@ api.interceptors.response.use(
         original.headers['Authorization'] = `Bearer ${newToken}`;
 
         processQueue(null, newToken);
-
-        console.log(
-          '%c[🔄 TOKEN REFRESHED] Retrying queued requests...',
-          'color: #00e676; font-weight: bold;'
-        );
-
-        return api(original); // retry the original failed request
+        return api(original);
       } catch (refreshError) {
         processQueue(refreshError, null);
         forceLogout();
-
-        console.warn(
-          '%c[🔒 SESSION EXPIRED] Refresh failed — user logged out.',
-          'color: #ff9800; font-weight: bold;'
-        );
-
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
       }
     }
 
-    // ── General error logger ─────────────────────────────────────────────
     console.error(
       `%c[❌ API ERROR] From ${original?.url || 'Unknown URL'}`,
       'color: #ff4747; font-weight: bold;',
-      {
-        status,
-        data: error.response?.data,
-        message: error.message,
-      }
+      { status, data: error.response?.data, message: error.message }
     );
+    console.error('[❌ API ERROR MESSAGE]', error.response?.data?.message, error.response?.data);
 
     return Promise.reject(error);
   }

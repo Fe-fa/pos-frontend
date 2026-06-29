@@ -7,8 +7,6 @@ const PAYMENT_METHODS = [
   { key: 'card', title: 'CARD', icon: CreditCard, tone: 'card' },
 ];
 
-const CASH_PRESETS = ['exact', 10, 20, 50, 100, 200, 500, 1000, 2000];
-
 export default function PaymentModal({
   isOpen,
   billing,
@@ -28,9 +26,9 @@ export default function PaymentModal({
   onClaimChapa5Reward,
   loyaltyMinPoints = 0,
   isBalanceSettlement = false,
+  isPreparingPayment = false,
 }) {
   const [paymentMethod, setPaymentMethod] = useState('cash');
-  const [amountReceived, setAmountReceived] = useState('');
   const [amountTendered, setAmountTendered] = useState('');
   const [mpesaPhone, setMpesaPhone] = useState('');
   const [mpesaCode, setMpesaCode] = useState('');
@@ -39,6 +37,10 @@ export default function PaymentModal({
   const [paymentError, setPaymentError] = useState('');
   const [loyaltyError, setLoyaltyError] = useState('');
   const [receiptPreview, setReceiptPreview] = useState(false);
+
+  function withLimiter(max, val) {
+    return val > max ? max : val;
+  }
 
   const invoiceSubtotal = Number(billing?.subtotal || 0);
   const invoiceTax = Number(billing?.vat_amount || 0);
@@ -53,7 +55,7 @@ export default function PaymentModal({
 
   const loyaltyDiscount = Math.max(
     0,
-    Math.min(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
+    withLimiter(invoiceAmount, Number(pointsToRedeem || 0) * Number(loyaltyPointValue || 0))
   );
 
   const discountedInvoiceAmount = Math.max(invoiceAmount - loyaltyDiscount, 0);
@@ -63,10 +65,7 @@ export default function PaymentModal({
     ? Number(billing?.balance_due || 0)
     : discountedInvoiceAmount + activeBalance;
 
-  const summaryNetTotal = combinedPayable;
-  const effectiveAmountToBePaid = Number(
-    isFullyCoveredByPoints ? 0 : amountReceived || combinedPayable || 0
-  );
+  const effectiveAmountToBePaid = isFullyCoveredByPoints ? 0 : combinedPayable;
   const effectiveCashTendered = Number(amountTendered || 0);
 
   const changeAmount =
@@ -88,7 +87,6 @@ export default function PaymentModal({
     const payableString = combinedPayable > 0 ? String(combinedPayable.toFixed(2)) : '';
 
     setPaymentMethod('cash');
-    setAmountReceived(payableString);
     setAmountTendered(payableString);
     setMpesaPhone('');
     setMpesaCode('');
@@ -101,20 +99,24 @@ export default function PaymentModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    setAmountReceived(combinedPayable > 0 ? String(combinedPayable.toFixed(2)) : '');
-  }, [pointsToRedeem, isOpen, combinedPayable]);
+    setAmountTendered(
+      effectiveAmountToBePaid > 0 ? String(effectiveAmountToBePaid.toFixed(2)) : ''
+    );
+  }, [isOpen, pointsToRedeem, effectiveAmountToBePaid]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setPaymentError('');
+  }, [billing?.items?.length, billing?.total, isOpen]);
 
   if (!isOpen) return null;
 
   const handlePaymentMethodChange = (method) => {
     setPaymentMethod(method);
     setPaymentError('');
-
-    if (method === 'cash') {
-      setAmountTendered((prev) =>
-        prev || effectiveAmountToBePaid > 0 ? String(effectiveAmountToBePaid.toFixed(2)) : ''
-      );
-    }
+    setAmountTendered(
+      effectiveAmountToBePaid > 0 ? String(effectiveAmountToBePaid.toFixed(2)) : ''
+    );
   };
 
   const handleQuickCashSelect = (preset) => {
@@ -154,13 +156,14 @@ export default function PaymentModal({
     }
 
     if (!isFullyCoveredByPoints) {
-      if (!amountReceived || Number(amountReceived) <= 0) {
+      const parsedTendered = Number(amountTendered || 0);
+      if (parsedTendered <= 0) {
         setPaymentError('Please enter a valid amount to be paid.');
         return false;
       }
 
-      if (paymentMethod === 'cash' && (!amountTendered || Number(amountTendered) <= 0)) {
-        setPaymentError('Please enter the cash received amount.');
+      if (paymentMethod === 'cash' && parsedTendered < effectiveAmountToBePaid) {
+        setPaymentError('Cash received cannot be less than amount to be paid.');
         return false;
       }
     }
@@ -191,12 +194,8 @@ export default function PaymentModal({
     try {
       await onCharge({
         paymentMethod,
-        amountReceived: isFullyCoveredByPoints ? 0 : Number(amountReceived || 0),
-        amountTendered: isFullyCoveredByPoints
-          ? 0
-          : paymentMethod === 'cash'
-            ? Number(amountTendered || amountReceived || 0)
-            : Number(amountReceived || 0),
+        amountReceived: isFullyCoveredByPoints ? 0 : effectiveAmountToBePaid,
+        amountTendered: isFullyCoveredByPoints ? 0 : Number(amountTendered || 0),
         mpesaPhone: paymentMethod === 'mpesa' ? mpesaPhone : null,
         mpesaCode: paymentMethod === 'mpesa' ? mpesaCode : null,
         cardReference: paymentMethod === 'card' ? cardReference : null,
@@ -211,11 +210,16 @@ export default function PaymentModal({
 
   return (
     <div className="modal-backdrop" onClick={() => !submitting && onClose()}>
-      <div className="modal-card payment-modal-card payment-modal-card--wide" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card payment-modal-card payment-modal-card--wide"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header payment-modal-header">
           <div>
             <h3>Payment</h3>
-            <p className="muted">{billing?.invnumber || `Draft #${billing?.billing_id || ''}`}</p>
+            {/* <p className="muted">
+              {billing?.invnumber || (billing?.billing_id ? `Draft #${billing.billing_id}` : 'Local sale')}
+            </p> */}
           </div>
 
           <button
@@ -247,7 +251,9 @@ export default function PaymentModal({
                   <div className="payment-kv-row">
                     <span>DISCOUNTS (Rewards)</span>
                     <strong className={loyaltyDiscount > 0 ? 'is-discount' : ''}>
-                      {loyaltyDiscount > 0 ? `-${loyaltyDiscountLabel}` : currency(0, currentStore?.currency)}
+                      {loyaltyDiscount > 0
+                        ? `-${loyaltyDiscountLabel}`
+                        : currency(0, currentStore?.currency)}
                     </strong>
                   </div>
 
@@ -268,7 +274,7 @@ export default function PaymentModal({
 
                 <div className="payment-kv-row payment-kv-row--net">
                   <span>NET TOTAL</span>
-                  <strong>{currency(summaryNetTotal, currentStore?.currency)}</strong>
+                  <strong>{currency(combinedPayable, currentStore?.currency)}</strong>
                 </div>
 
                 <div className="payment-summary-divider payment-summary-divider--soft" />
@@ -309,12 +315,12 @@ export default function PaymentModal({
                   <div className="payment-loyalty-block">
                     <div className="payment-loyalty-copy">
                       <span className="payment-loyalty-label">Loyalty Details</span>
-                      <strong className="payment-loyalty-points">{Number(loyaltyPoints || 0)} pts</strong>
+                      <strong className="payment-loyalty-points">
+                        {Number(loyaltyPoints || 0)} pts
+                      </strong>
                     </div>
 
-                    {pointsToRedeem > 0 ? (
-                      <span className="badge success">Reward claimed</span>
-                    ) : null}
+                    {pointsToRedeem > 0 ? <span className="badge success">Reward claimed</span> : null}
                   </div>
 
                   <div className="payment-loyalty-actions">
@@ -440,22 +446,22 @@ export default function PaymentModal({
                     />
                   </label>
 
-                  <div className="payment-quick-grid">
-                    {CASH_PRESETS.map((preset) => (
-                      <button
-                        key={String(preset)}
-                        type="button"
-                        className="payment-quick-chip"
-                        onClick={() => handleQuickCashSelect(preset)}
-                      >
-                        {preset === 'exact' ? 'Exact' : preset}
-                      </button>
-                    ))}
-                  </div>
-
                   <div className="payment-change-box">
                     <span>Change:</span>
                     <strong>{currency(changeAmount, currentStore?.currency)}</strong>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                    <button type="button" className="ghost-button" onClick={() => handleQuickCashSelect('exact')}>
+                      Exact
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => handleQuickCashSelect(Math.ceil(effectiveAmountToBePaid))}
+                    >
+                      Round Up
+                    </button>
                   </div>
                 </>
               ) : null}
@@ -469,8 +475,8 @@ export default function PaymentModal({
                       type="number"
                       min="0"
                       step="0.01"
-                      value={amountReceived}
-                      onChange={(e) => setAmountReceived(e.target.value)}
+                      value={amountTendered}
+                      onChange={(e) => setAmountTendered(e.target.value)}
                       placeholder="Amount to be paid"
                     />
                   </label>
@@ -508,8 +514,8 @@ export default function PaymentModal({
                       type="number"
                       min="0"
                       step="0.01"
-                      value={amountReceived}
-                      onChange={(e) => setAmountReceived(e.target.value)}
+                      value={amountTendered}
+                      onChange={(e) => setAmountTendered(e.target.value)}
                       placeholder="Paid amount"
                     />
                   </label>
@@ -548,12 +554,17 @@ export default function PaymentModal({
                 onClick={handleChargeClick}
                 disabled={
                   submitting ||
+                  isPreparingPayment ||
                   !paymentMethod ||
                   billing?.status === 'paid' ||
                   (!billing?.items?.length && !isBalanceSettlement && activeBalance <= 0)
                 }
               >
-                {billing?.status === 'paid' ? 'Already paid' : 'Charge Payment'}
+                {billing?.status === 'paid'
+                  ? 'Already paid'
+                  : submitting
+                  ? 'Processing...'
+                  : 'Charge Payment'}
               </button>
 
               <button

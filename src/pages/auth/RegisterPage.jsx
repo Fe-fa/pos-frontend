@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { authService } from '../../services/authService';  
+import { storageKeys } from '../../lib/api'; 
 
 const initialState = {
   first_name: '',
@@ -20,24 +22,31 @@ export default function RegisterPage() {
   const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    setError('');
-    setSuccess('');
-    setSubmitting(true);
+const handleSubmit = async (event) => {
+  event.preventDefault();
+  setError('');
+  setSuccess('');
+  setSubmitting(true);
 
-    try {
-      await register(form);
-      setSuccess('Registration successful. Your cashier account is waiting for store assignment by a manager or system admin.');
-      setTimeout(() => navigate('/login'), 1200);
-    } catch (err) {
-      const errors = err?.response?.data?.errors;
-      const firstError = errors ? Object.values(errors)[0]?.[0] : null;
-      setError(firstError || err?.response?.data?.message || 'Registration failed.');
-    } finally {
-      setSubmitting(false);
+  try {
+    const response = await authService.register(form);
+
+    // If the backend returns a token, store it so /verify-email
+    // can call /auth/resend-verification and /auth/verify-email
+    if (response?.access_token) {
+      localStorage.setItem(storageKeys.token, response.access_token);
     }
-  };
+
+    // Redirect to verify email page, passing the user for display
+    navigate('/verify-email', { state: { user: response?.user } });
+  } catch (err) {
+    const errors = err?.response?.data?.errors;
+    const firstError = errors ? Object.values(errors)[0]?.[0] : null;
+    setError(firstError || err?.response?.data?.message || 'Registration failed.');
+  } finally {
+    setSubmitting(false);
+  }
+};
   return (
     <div className="auth-shell">
       <div className="auth-card auth-card-wide">
