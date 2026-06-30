@@ -1257,7 +1257,7 @@ await refresh();
           <div className="mg-hero-stat" id="shift-closure-panel">
             <span className="mg-hero-stat__label">Drawer Reconciliation</span>
             <strong className="mg-hero-stat__value mg-text-danger">
-              SHORT (-{currentCurrency} {toNumber(expectedCash).toFixed(2)})
+              {currentCurrency} {toNumber(expectedCash).toFixed(2)}
             </strong>
             <small className={shiftClosureBlocked ? 'mg-text-warn' : 'mg-text-success'}>
               {shiftClosureBlocked

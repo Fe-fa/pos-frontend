@@ -17,7 +17,7 @@ export const productService = {
   async create(payload) {
     if (isFormData(payload)) {
       const response = await api.post('/products', payload, {
-        headers: { Accept: 'application/json' },
+        headers: { 'Content-Type': undefined },  // force axios to set multipart boundary
       });
       return response.data;
     }
@@ -31,7 +31,7 @@ export const productService = {
       payload.append('_method', 'PUT');
 
       const response = await api.post(`/products/${productId}`, payload, {
-        headers: { Accept: 'application/json' },
+        headers: { 'Content-Type': undefined },  // force axios to set multipart boundary
       });
       return response.data;
     }
@@ -42,6 +42,11 @@ export const productService = {
 
   async remove(productId) {
     const response = await api.delete(`/products/${productId}`);
+    return response.data;
+  },
+
+  async patch(productId, payload) {
+    const response = await api.patch(`/products/${productId}`, payload);
     return response.data;
   },
 };

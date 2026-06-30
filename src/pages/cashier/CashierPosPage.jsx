@@ -11,7 +11,9 @@ import {
   ShoppingCart,
   Trash2,
   Download,
+  Clock,
 } from 'lucide-react';
+
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import ProductListRow from '../../components/card/ProductListRow';
@@ -33,6 +35,7 @@ import { storeService } from '../../services/storeService';
 import { currency, formatDateTime } from '../../utils/helpers';
 import { openBillingPrint, downloadBillingDocument } from '../../utils/print';
 import { mergeStoreSettings } from '../../utils/storeSettings';
+import HistoryModal from '../../components/modals/HistoryModal';
 
 const SEARCH_DEBOUNCE_MS = 500;
 const PRODUCT_CACHE_TTL_MS = 60_000;
@@ -82,9 +85,9 @@ const getProductImage = (product) => {
 const getItemTotal = (item) =>
   Number(
     item?.total_amount ??
-      item?.line_total ??
-      item?.line_subtotal ??
-      Number(item?.quantity || 0) * Number(item?.unit_price || 0)
+    item?.line_total ??
+    item?.line_subtotal ??
+    Number(item?.quantity || 0) * Number(item?.unit_price || 0)
   );
 
 const isTypingElement = (target) => {
@@ -249,12 +252,12 @@ const clonePersistedItems = (items = []) =>
     product_id: it.product_id,
     product: it.product
       ? {
-          product_id: it.product.product_id,
-          product_name: it.product.product_name,
-          sku: it.product.sku,
-          price: it.product.price,
-          vat_rate: it.product.vat_rate,
-        }
+        product_id: it.product.product_id,
+        product_name: it.product.product_name,
+        sku: it.product.sku,
+        price: it.product.price,
+        vat_rate: it.product.vat_rate,
+      }
       : null,
     quantity: Number(it.quantity || 0),
     unit_price: Number(it.unit_price || 0),
@@ -272,18 +275,18 @@ const buildPersistedCartSnapshot = ({ billing, selectedCustomerId, notes, storeI
   userId: String(userId || ''),
   billing: billing
     ? {
-        billing_id: billing.billing_id || null,
-        invnumber: billing.invnumber || null,
-        is_draft: billing.is_draft ?? true,
-        status: billing.status || null,
-        customer_id: billing.customer_id || null,
-        notes: billing.notes || null,
-        subtotal: Number(billing.subtotal || 0),
-        vat_amount: Number(billing.vat_amount || 0),
-        total: Number(billing.total || 0),
-        vat_rate: Number(billing.vat_rate || DEFAULT_VAT_RATE),
-        items: clonePersistedItems(billing.items || []),
-      }
+      billing_id: billing.billing_id || null,
+      invnumber: billing.invnumber || null,
+      is_draft: billing.is_draft ?? true,
+      status: billing.status || null,
+      customer_id: billing.customer_id || null,
+      notes: billing.notes || null,
+      subtotal: Number(billing.subtotal || 0),
+      vat_amount: Number(billing.vat_amount || 0),
+      total: Number(billing.total || 0),
+      vat_rate: Number(billing.vat_rate || DEFAULT_VAT_RATE),
+      items: clonePersistedItems(billing.items || []),
+    }
     : buildEmptyLocalBilling(),
   selectedCustomerId: selectedCustomerId || '',
   notes: notes || '',
@@ -391,7 +394,7 @@ const VirtualizedProductGrid = memo(function VirtualizedProductGrid({
     const endRow = Math.min(
       totalRows,
       Math.ceil((scrollTop + viewportHeight) / PRODUCT_CARD_ESTIMATED_HEIGHT) +
-        PRODUCT_GRID_OVERSCAN_ROWS
+      PRODUCT_GRID_OVERSCAN_ROWS
     );
 
     const cells = [];
@@ -644,6 +647,7 @@ export default function CashierPosPage() {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showDraftModal, setShowDraftModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [isBalanceSettlement, setIsBalanceSettlement] = useState(false);
   const [isPreparingPayment, setIsPreparingPayment] = useState(false);
 
@@ -767,10 +771,10 @@ export default function CashierPosPage() {
     () =>
       Number(
         billing?.customer?.current_balance ??
-          selectedCustomer?.current_balance ??
-          selectedCustomer?.balance ??
-          selectedCustomer?.opening_balance ??
-          0
+        selectedCustomer?.current_balance ??
+        selectedCustomer?.balance ??
+        selectedCustomer?.opening_balance ??
+        0
       ),
     [billing?.customer, selectedCustomer]
   );
@@ -817,19 +821,19 @@ export default function CashierPosPage() {
     [user]
   );
 
-const resetSale = useCallback(() => {
-  setBilling(null);
-  setSelectedCustomerId('');
-  setSelectedCustomer(null);
-  setNotes('');
-  setChapa5ClaimedQty(0);
-  setShowPaymentModal(false);
-  setShowCustomerModal(false);
-  setIsBalanceSettlement(false);
+  const resetSale = useCallback(() => {
+    setBilling(null);
+    setSelectedCustomerId('');
+    setSelectedCustomer(null);
+    setNotes('');
+    setChapa5ClaimedQty(0);
+    setShowPaymentModal(false);
+    setShowCustomerModal(false);
+    setIsBalanceSettlement(false);
 
-  draftServerSnapshotRef.current = [];
-  lastSyncedHeaderRef.current = { customerId: null, notes: null, billingId: null };
-}, []);
+    draftServerSnapshotRef.current = [];
+    lastSyncedHeaderRef.current = { customerId: null, notes: null, billingId: null };
+  }, []);
 
 
   const resetProductState = useCallback(() => {
@@ -957,7 +961,7 @@ const resetSale = useCallback(() => {
         setCategories(items);
         setCategoryPageInfo(emptyPageInfo());
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setCategoriesLoading(false));
   }, [debouncedCategorySearch, storeId, loadCategoriesPage]);
 
@@ -978,8 +982,7 @@ const resetSale = useCallback(() => {
     } catch (err) {
       console.error('POS catalog load failed:', err);
       setError(
-        `Failed to load catalog: ${
-          err?.response?.data?.message || err?.message || 'Network Error'
+        `Failed to load catalog: ${err?.response?.data?.message || err?.message || 'Network Error'
         }`
       );
       return { categories: [], categoryPageInfo: emptyPageInfo() };
@@ -1136,135 +1139,135 @@ const resetSale = useCallback(() => {
     [storeId]
   );
 
-const loadBillingDetail = useCallback(
-  async (billingId, { silent = false } = {}) => {
-    if (!billingId) return null;
-    if (!silent) setBillingLoading(true);
+  const loadBillingDetail = useCallback(
+    async (billingId, { silent = false } = {}) => {
+      if (!billingId) return null;
+      if (!silent) setBillingLoading(true);
 
-    try {
-      const response = await billingService.show(billingId);
-      const detail = response?.data || response;
+      try {
+        const response = await billingService.show(billingId);
+        const detail = response?.data || response;
 
-      const enriched = {
-        ...detail,
-        __local: false,
-      };
+        const enriched = {
+          ...detail,
+          __local: false,
+        };
 
-      draftServerSnapshotRef.current = clonePersistedItems(detail?.items || []);
-      lastSyncedHeaderRef.current = {
-        billingId: detail?.billing_id || null,
-        customerId: detail?.customer_id || null,
-        notes: detail?.notes || null,
-      };
+        draftServerSnapshotRef.current = clonePersistedItems(detail?.items || []);
+        lastSyncedHeaderRef.current = {
+          billingId: detail?.billing_id || null,
+          customerId: detail?.customer_id || null,
+          notes: detail?.notes || null,
+        };
 
-      setBilling(enriched);
-      setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
-      setNotes(detail?.notes || '');
-      mergeDraftPreview(detail);
+        setBilling(enriched);
+        setSelectedCustomerId(detail?.customer_id ? String(detail.customer_id) : '');
+        setNotes(detail?.notes || '');
+        mergeDraftPreview(detail);
 
-      return enriched;
-    } catch (err) {
-      setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
-      throw err;
-    } finally {
-      if (!silent) setBillingLoading(false);
-    }
-  },
-  [mergeDraftPreview]
-);
+        return enriched;
+      } catch (err) {
+        setError(err?.response?.data?.message || err?.message || 'Failed to load billing details.');
+        throw err;
+      } finally {
+        if (!silent) setBillingLoading(false);
+      }
+    },
+    [mergeDraftPreview]
+  );
 
-const isServerBackedItem = (item) =>
-  !!item?.billing_item_id &&
-  !String(item.billing_item_id).startsWith('local-') &&
-  !item?.__local;
+  const isServerBackedItem = (item) =>
+    !!item?.billing_item_id &&
+    !String(item.billing_item_id).startsWith('local-') &&
+    !item?.__local;
 
-const syncDraftItemsToServer = useCallback(
-  async (billingId, localItems = []) => {
-    if (!billingId) return null;
+  const syncDraftItemsToServer = useCallback(
+    async (billingId, localItems = []) => {
+      if (!billingId) return null;
 
-    const originalItems = Array.isArray(draftServerSnapshotRef.current)
-      ? draftServerSnapshotRef.current
-      : [];
+      const originalItems = Array.isArray(draftServerSnapshotRef.current)
+        ? draftServerSnapshotRef.current
+        : [];
 
-    const originalServerItems = originalItems.filter(isServerBackedItem);
-    const localServerItems = (localItems || []).filter(isServerBackedItem);
-    const localNewItems = (localItems || []).filter(
-      (item) =>
-        !!item?.product_id &&
-        (item?.__local || String(item?.billing_item_id || '').startsWith('local-'))
-    );
+      const originalServerItems = originalItems.filter(isServerBackedItem);
+      const localServerItems = (localItems || []).filter(isServerBackedItem);
+      const localNewItems = (localItems || []).filter(
+        (item) =>
+          !!item?.product_id &&
+          (item?.__local || String(item?.billing_item_id || '').startsWith('local-'))
+      );
 
-    const originalById = new Map(
-      originalServerItems.map((item) => [String(item.billing_item_id), item])
-    );
+      const originalById = new Map(
+        originalServerItems.map((item) => [String(item.billing_item_id), item])
+      );
 
-    const localServerIds = new Set(
-      localServerItems.map((item) => String(item.billing_item_id))
-    );
+      const localServerIds = new Set(
+        localServerItems.map((item) => String(item.billing_item_id))
+      );
 
-    const removedCalls = originalServerItems
-      .filter((item) => !localServerIds.has(String(item.billing_item_id)))
-      .map((item) => billingService.removeItem(item.billing_item_id));
+      const removedCalls = originalServerItems
+        .filter((item) => !localServerIds.has(String(item.billing_item_id)))
+        .map((item) => billingService.removeItem(item.billing_item_id));
 
-    const updatedCalls = localServerItems
-      .filter((item) => {
-        const original = originalById.get(String(item.billing_item_id));
-        if (!original) return false;
+      const updatedCalls = localServerItems
+        .filter((item) => {
+          const original = originalById.get(String(item.billing_item_id));
+          if (!original) return false;
 
-        const qtyChanged =
-          Number(original.quantity || 0) !== Number(item.quantity || 0);
+          const qtyChanged =
+            Number(original.quantity || 0) !== Number(item.quantity || 0);
 
-        const priceChanged =
-          Number(original.unit_price || 0).toFixed(2) !==
-          Number(item.unit_price || 0).toFixed(2);
+          const priceChanged =
+            Number(original.unit_price || 0).toFixed(2) !==
+            Number(item.unit_price || 0).toFixed(2);
 
-        return qtyChanged || priceChanged;
-      })
-      .map((item) =>
-        billingService.updateItem(item.billing_item_id, {
+          return qtyChanged || priceChanged;
+        })
+        .map((item) =>
+          billingService.updateItem(item.billing_item_id, {
+            quantity: Number(item.quantity || 0),
+            unit_price: Number(item.unit_price || 0),
+          })
+        );
+
+      const createdCalls = localNewItems.map((item) =>
+        billingService.addItem(billingId, {
+          product_id: Number(item.product_id),
           quantity: Number(item.quantity || 0),
           unit_price: Number(item.unit_price || 0),
         })
       );
 
-    const createdCalls = localNewItems.map((item) =>
-      billingService.addItem(billingId, {
-        product_id: Number(item.product_id),
-        quantity: Number(item.quantity || 0),
-        unit_price: Number(item.unit_price || 0),
-      })
-    );
+      await Promise.all([...removedCalls, ...updatedCalls, ...createdCalls]);
 
-    await Promise.all([...removedCalls, ...updatedCalls, ...createdCalls]);
+      const refreshed = await loadBillingDetail(billingId, { silent: true });
+      draftServerSnapshotRef.current = clonePersistedItems(refreshed?.items || []);
 
-    const refreshed = await loadBillingDetail(billingId, { silent: true });
-    draftServerSnapshotRef.current = clonePersistedItems(refreshed?.items || []);
+      return refreshed;
+    },
+    [loadBillingDetail]
+  );
+
+  const persistDraftChanges = useCallback(async () => {
+    const current = billingRef.current;
+    if (!current?.billing_id) return null;
+
+    await billingService.update(current.billing_id, {
+      customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
+      notes: notes || null,
+    });
+
+    lastSyncedHeaderRef.current = {
+      billingId: current.billing_id,
+      customerId: selectedCustomerId || null,
+      notes: notes || null,
+    };
+
+    const refreshed = await syncDraftItemsToServer(current.billing_id, current.items || []);
+    if (refreshed) mergeDraftPreview(refreshed);
 
     return refreshed;
-  },
-  [loadBillingDetail]
-);
-
-const persistDraftChanges = useCallback(async () => {
-  const current = billingRef.current;
-  if (!current?.billing_id) return null;
-
-  await billingService.update(current.billing_id, {
-    customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
-    notes: notes || null,
-  });
-
-  lastSyncedHeaderRef.current = {
-    billingId: current.billing_id,
-    customerId: selectedCustomerId || null,
-    notes: notes || null,
-  };
-
-  const refreshed = await syncDraftItemsToServer(current.billing_id, current.items || []);
-  if (refreshed) mergeDraftPreview(refreshed);
-
-  return refreshed;
-}, [selectedCustomerId, notes, syncDraftItemsToServer, mergeDraftPreview]);
+  }, [selectedCustomerId, notes, syncDraftItemsToServer, mergeDraftPreview]);
 
 
   loadStaticDataRef.current = loadStaticData;
@@ -1709,49 +1712,49 @@ const persistDraftChanges = useCallback(async () => {
     return updatedBilling;
   }, [selectedCustomerId, notes, loadBillingDetail, mergeDraftPreview]);
 
-const handleSaveOrUpdateDraft = useCallback(async () => {
-  const current = billingRef.current;
-  if (!current?.items?.length) return;
+  const handleSaveOrUpdateDraft = useCallback(async () => {
+    const current = billingRef.current;
+    if (!current?.items?.length) return;
 
-  setError('');
-  setSuccess('');
-  setSubmitting(true);
+    setError('');
+    setSuccess('');
+    setSubmitting(true);
 
-  try {
-    let finalBilling;
+    try {
+      let finalBilling;
 
-    if (!current.billing_id) {
-      finalBilling = await promoteLocalCartToServerDraft();
-    } else {
-      finalBilling = await persistDraftChanges();
+      if (!current.billing_id) {
+        finalBilling = await promoteLocalCartToServerDraft();
+      } else {
+        finalBilling = await persistDraftChanges();
+      }
+
+      if (finalBilling) {
+        mergeDraftPreview(finalBilling);
+      }
+
+      setSuccess(
+        finalBilling?.billing_id
+          ? `Draft #${finalBilling.billing_id} saved successfully.`
+          : 'Draft saved successfully.'
+      );
+
+      resetSale();
+      clearPersistedCartSession();
+      void loadDrafts({ silent: true });
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
+    } finally {
+      setSubmitting(false);
     }
-
-    if (finalBilling) {
-      mergeDraftPreview(finalBilling);
-    }
-
-    setSuccess(
-      finalBilling?.billing_id
-        ? `Draft #${finalBilling.billing_id} saved successfully.`
-        : 'Draft saved successfully.'
-    );
-
-    resetSale();
-    clearPersistedCartSession();
-    void loadDrafts({ silent: true });
-  } catch (err) {
-    setError(err?.response?.data?.message || err?.message || 'Unable to save draft.');
-  } finally {
-    setSubmitting(false);
-  }
-}, [
-  mergeDraftPreview,
-  persistDraftChanges,
-  promoteLocalCartToServerDraft,
-  resetSale,
-  clearPersistedCartSession,
-  loadDrafts,
-]);
+  }, [
+    mergeDraftPreview,
+    persistDraftChanges,
+    promoteLocalCartToServerDraft,
+    resetSale,
+    clearPersistedCartSession,
+    loadDrafts,
+  ]);
 
   const handleProceedToPayment = useCallback(() => {
     setError('');
@@ -1759,134 +1762,134 @@ const handleSaveOrUpdateDraft = useCallback(async () => {
     setShowPaymentModal(true);
   }, []);
 
-const handleCharge = useCallback(
-  async (paymentDetails) => {
-    const current = billingRef.current;
+  const handleCharge = useCallback(
+    async (paymentDetails) => {
+      const current = billingRef.current;
 
-    if (!current?.items?.length && !isBalanceSettlement) return;
+      if (!current?.items?.length && !isBalanceSettlement) return;
 
-    if (current?.status === 'paid') {
-      setShowPaymentModal(false);
-      return;
-    }
-
-    setSubmitting(true);
-    setSuccess('');
-    setError('');
-
-    try {
-      let paidBilling = null;
-
-      const paymentPayload = {
-        payment_method: paymentDetails.paymentMethod,
-        amount_received: paymentDetails.amountReceived,
-        amount_tendered: paymentDetails.amountTendered,
-        points_redeemed: paymentDetails.pointsToRedeem,
-        mpesa_phone: paymentDetails.mpesaPhone,
-        mpesa_code: paymentDetails.mpesaCode,
-        card_reference: paymentDetails.cardReference,
-        card_holder: paymentDetails.cardHolder,
-      };
-
-      // 1. Existing balance settlement
-      if (isBalanceSettlement && current?.billing_id) {
-        await billingService.chargeExisting(current.billing_id, paymentPayload);
-
-        const paidResponse = await billingService.show(current.billing_id);
-        paidBilling = paidResponse?.data || paidResponse;
+      if (current?.status === 'paid') {
+        setShowPaymentModal(false);
+        return;
       }
-      // 2. Loaded server draft -> sync draft first, then charge existing billing
-      else if (current?.billing_id) {
-        await persistDraftChanges();
-        await billingService.chargeExisting(current.billing_id, paymentPayload);
 
-        const paidResponse = await billingService.show(current.billing_id);
-        paidBilling = paidResponse?.data || paidResponse;
-      }
-      // 3. Pure local cart -> atomic one-shot checkout
-      else {
-        const payload = {
-          store_id: Number(storeId),
-          customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
-          notes: notes || null,
-          items: (current.items || []).map((item) => ({
-            product_id: Number(item.product_id),
-            quantity: Number(item.quantity || 0),
-            price: Number(item.unit_price || 0),
-            vat_rate: Number(item.vat_rate ?? DEFAULT_VAT_RATE),
-          })),
-          payment: {
-            method: paymentDetails.paymentMethod,
-            amount_received: paymentDetails.amountReceived,
-            amount_tendered: paymentDetails.amountTendered,
-            points_redeemed: paymentDetails.pointsToRedeem,
-            mpesa_phone: paymentDetails.mpesaPhone,
-            mpesa_code: paymentDetails.mpesaCode,
-            card_reference: paymentDetails.cardReference,
-            card_holder: paymentDetails.cardHolder,
-          },
+      setSubmitting(true);
+      setSuccess('');
+      setError('');
+
+      try {
+        let paidBilling = null;
+
+        const paymentPayload = {
+          payment_method: paymentDetails.paymentMethod,
+          amount_received: paymentDetails.amountReceived,
+          amount_tendered: paymentDetails.amountTendered,
+          points_redeemed: paymentDetails.pointsToRedeem,
+          mpesa_phone: paymentDetails.mpesaPhone,
+          mpesa_code: paymentDetails.mpesaCode,
+          card_reference: paymentDetails.cardReference,
+          card_holder: paymentDetails.cardHolder,
         };
 
-        const response = await billingService.charge(payload);
+        // 1. Existing balance settlement
+        if (isBalanceSettlement && current?.billing_id) {
+          await billingService.chargeExisting(current.billing_id, paymentPayload);
 
-        paidBilling =
-          response?.data?.billing ||
-          response?.billing ||
-          response?.data?.invoice ||
-          response?.invoice ||
-          null;
+          const paidResponse = await billingService.show(current.billing_id);
+          paidBilling = paidResponse?.data || paidResponse;
+        }
+        // 2. Loaded server draft -> sync draft first, then charge existing billing
+        else if (current?.billing_id) {
+          await persistDraftChanges();
+          await billingService.chargeExisting(current.billing_id, paymentPayload);
+
+          const paidResponse = await billingService.show(current.billing_id);
+          paidBilling = paidResponse?.data || paidResponse;
+        }
+        // 3. Pure local cart -> atomic one-shot checkout
+        else {
+          const payload = {
+            store_id: Number(storeId),
+            customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
+            notes: notes || null,
+            items: (current.items || []).map((item) => ({
+              product_id: Number(item.product_id),
+              quantity: Number(item.quantity || 0),
+              price: Number(item.unit_price || 0),
+              vat_rate: Number(item.vat_rate ?? DEFAULT_VAT_RATE),
+            })),
+            payment: {
+              method: paymentDetails.paymentMethod,
+              amount_received: paymentDetails.amountReceived,
+              amount_tendered: paymentDetails.amountTendered,
+              points_redeemed: paymentDetails.pointsToRedeem,
+              mpesa_phone: paymentDetails.mpesaPhone,
+              mpesa_code: paymentDetails.mpesaCode,
+              card_reference: paymentDetails.cardReference,
+              card_holder: paymentDetails.cardHolder,
+            },
+          };
+
+          const response = await billingService.charge(payload);
+
+          paidBilling =
+            response?.data?.billing ||
+            response?.billing ||
+            response?.data?.invoice ||
+            response?.invoice ||
+            null;
+        }
+
+        if (!paidBilling) {
+          throw new Error('Paid billing response was not returned by server.');
+        }
+
+        const printMode =
+          Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
+
+        openBillingPrint(
+          { ...paidBilling, store: paidBilling.store || currentStore },
+          currentStore,
+          printMode,
+          printSettings
+        );
+
+        if (paidBilling?.billing_id) {
+          removeDraftPreview(paidBilling.billing_id);
+        }
+
+        resetSale();
+        clearPersistedCartSession();
+        setPointsToRedeem(0);
+        setShowPaymentModal(false);
+        setIsBalanceSettlement(false);
+        setSuccess('Payment processed successfully.');
+        focusSearchInput(true);
+
+        void loadDrafts({ silent: true });
+      } catch (err) {
+        throw new Error(
+          err?.response?.data?.message || err?.message || 'Unable to process payment.'
+        );
+      } finally {
+        setSubmitting(false);
       }
-
-      if (!paidBilling) {
-        throw new Error('Paid billing response was not returned by server.');
-      }
-
-      const printMode =
-        Number(paidBilling?.balance_due || 0) <= 0 ? 'receipt' : 'invoice';
-
-      openBillingPrint(
-        { ...paidBilling, store: paidBilling.store || currentStore },
-        currentStore,
-        printMode,
-        printSettings
-      );
-
-      if (paidBilling?.billing_id) {
-        removeDraftPreview(paidBilling.billing_id);
-      }
-
-      resetSale();
-      clearPersistedCartSession();
-      setPointsToRedeem(0);
-      setShowPaymentModal(false);
-      setIsBalanceSettlement(false);
-      setSuccess('Payment processed successfully.');
-      focusSearchInput(true);
-
-      void loadDrafts({ silent: true });
-    } catch (err) {
-      throw new Error(
-        err?.response?.data?.message || err?.message || 'Unable to process payment.'
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  },
-  [
-    clearPersistedCartSession,
-    currentStore,
-    focusSearchInput,
-    isBalanceSettlement,
-    notes,
-    persistDraftChanges,
-    printSettings,
-    removeDraftPreview,
-    resetSale,
-    selectedCustomerId,
-    storeId,
-    loadDrafts,
-  ]
-);
+    },
+    [
+      clearPersistedCartSession,
+      currentStore,
+      focusSearchInput,
+      isBalanceSettlement,
+      notes,
+      persistDraftChanges,
+      printSettings,
+      removeDraftPreview,
+      resetSale,
+      selectedCustomerId,
+      storeId,
+      loadDrafts,
+    ]
+  );
 
   const handleLoadDraft = useCallback(
     async (draftId) => {
@@ -2449,7 +2452,7 @@ const handleCharge = useCallback(
                 <p className="invoice-subtext">
                   {billing
                     ? billing.invnumber ||
-                      (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
+                    (billing.billing_id ? `Draft #${billing.billing_id}` : 'In-progress cart')
                     : 'No active billing yet'}
                 </p>
               </div>
@@ -2472,7 +2475,7 @@ const handleCharge = useCallback(
                       className="change-customer-btn"
                       onClick={() => setShowCustomerModal(true)}
                     >
-                      Change
+                      {selectedCustomerId ? 'Change' : 'Select Customer'}
                     </button>
 
                     {canDraft && (
@@ -2488,6 +2491,16 @@ const handleCharge = useCallback(
                         Drafts ({drafts.length})
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      className="ghost-button view-drafts-btn"
+                      onClick={() => setShowHistoryModal(true)}
+                      title="Order History"
+                    >
+                      <Clock size={16} />
+                      History
+                    </button>
                   </div>
                 </div>
               ) : (
@@ -2518,6 +2531,16 @@ const handleCharge = useCallback(
                         Drafts ({drafts.length})
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      className="ghost-button view-drafts-btn"
+                      onClick={() => setShowHistoryModal(true)}
+                      title="Order History"
+                    >
+                      <Clock size={16} />
+                      Reprint
+                    </button>
                   </div>
                 </div>
               )}
@@ -2761,6 +2784,12 @@ const handleCharge = useCallback(
         onSelectCustomer={handleCustomerSelect}
         customers={customers}
         customersLoading={customersLoading}
+      />
+      <HistoryModal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        currentStore={currentStore}
+        printSettings={printSettings}
       />
     </>
   );

@@ -247,7 +247,6 @@ textarea {
   align-items: center;
   gap: 12px;
   padding-bottom: 18px;
-  border-bottom: 1px solid rgba(79, 140, 166, 0.2);
   margin-bottom: 8px;
 }
 
@@ -257,7 +256,7 @@ textarea {
   height: 46px;
   border-radius: 14px;
   background: linear-gradient(135deg, var(--hero-teal-1), var(--brand-blue));
-  color: #fff;
+  color:#FF9922;
   display: grid;
   place-items: center;
   font-weight: 800;
@@ -281,11 +280,9 @@ textarea {
 .brand-inline h1 {
   font-size: 1rem;
   font-weight: 700;
-  color: #ffffff;
+  color: #FF9922;
   letter-spacing: -0.01em;
 }
-
-/* Store name shown below the app name */
 .brand-store-name {
   font-size: 0.78rem;
   font-weight: 700;
@@ -298,13 +295,12 @@ textarea {
 
 .brand-block p,
 .brand-inline p {
-  color: rgba(255, 255, 255, 0.45);
+  color: #1B9AD1;
   font-size: var(--text-xs);
   line-height: 1.4;
   margin: 0;
 }
 
-/* ── Nav section labels ── */
 .nav-section-label {
   font-size: 0.65rem;
   font-weight: 800;
@@ -316,7 +312,6 @@ textarea {
   user-select: none;
 }
 
-/* ── Nav list ── */
 .nav-list {
   display: flex;
   flex-direction: column;
@@ -6091,14 +6086,19 @@ textarea:focus {
   content: ''; position: absolute; inset: 6px auto 6px 0; width: 3px;
   border-radius: 0 4px 4px 0; background: linear-gradient(180deg, var(--hero-teal-2), var(--brand-blue));
 }
-/* ── Cashier topbar layout ── */
+.cashier-shell {
+  min-height: 100vh;
+}
+
+.cashier-shell .cashier-topbar {
+  padding-top: 16px;
+}
 .cashier-topbar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 20px;
   height: 56px;
-  border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
 

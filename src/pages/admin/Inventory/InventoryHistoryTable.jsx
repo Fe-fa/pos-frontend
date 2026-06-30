@@ -102,7 +102,7 @@ export default function InventoryHistoryTable({
       {/* Header */}
       <div className="inv-history-header">
         <div className="catalog-hero-copy">
-          <h3 className="inv-history-title">Comprehensive Inventory Ledger &amp; History</h3>
+          <h3 className="inv-history-title">Inventory Ledger &amp; History</h3>
           {isFetching && rows.length > 0 && (
             <p className="catalog-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Spinner size={12} style={{ color: 'var(--color-text-secondary)' }} />

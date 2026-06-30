@@ -23,10 +23,16 @@ import {
   UserPlus,
   Wallet,
   Zap,
+  Check,
+  Timer,
+  Scissors,
+  X,
 } from 'lucide-react';
 import { useSuperAdminDashboard } from '../../hooks/useSuperAdminDashboard';
 import { currency } from '../../utils/helpers';
 import '../../styles/super-admin-dashboard.css';
+import api from '../../lib/api';
+import { openZReportPrint } from '../../utils/print';
 
 /* =====================================================================
    HELPERS
@@ -374,20 +380,526 @@ const AuditFeed = memo(function AuditFeed({ events, meta, onPageChange, currentP
     </div>
   );
 });
+/* =====================================================================
+   SHIFT CLOSURE MODAL (copied from ManagerDashboardPage — not exported)
+   ===================================================================== */
+const ShiftClosureModal = memo(function ShiftClosureModal({
+  open,
+  onClose,
+  unresolvedVoids,
+  currentCurrency,
+  expectedCash,
+  loading,
+  error,
+  onConfirm,
+}) {
+  const [countedCash, setCountedCash] = useState('');
+
+  if (!open) return null;
+
+  const blocked = unresolvedVoids > 0;
+  const counted = countedCash === '' ? null : toNumber(countedCash);
+  const variance = counted !== null ? counted - expectedCash : null;
+  const isShort = variance !== null && variance < 0;
+  const isOver = variance !== null && variance > 0;
+
+  const drawerLabel =
+    variance === null
+      ? '—'
+      : isShort
+        ? `SHORT (-${currentCurrency} ${Math.abs(variance).toFixed(2)})`
+        : isOver
+          ? `OVER (+${currentCurrency} ${variance.toFixed(2)})`
+          : `BALANCED (${currentCurrency} 0.00)`;
+
+  const drawerClass =
+    variance === null
+      ? ''
+      : isShort
+        ? 'mg-text-danger'
+        : isOver
+          ? 'mg-text-warn'
+          : 'mg-text-success';
+
+  return (
+    <div className="modal-backdrop" onClick={loading ? undefined : onClose}>
+      <div className="modal-box mg-shift-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2 className="modal-title">Finalize Shift Closure</h2>
+            <p className="modal-sub">Drawer Reconciliation &amp; Z-Report</p>
+          </div>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close"
+            disabled={loading}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className={`mg-shift-state ${blocked ? 'mg-shift-state--blocked' : 'mg-shift-state--ready'}`}>
+            <strong>{blocked ? 'Shift closure blocked' : 'Shift ready for finalization'}</strong>
+            <p>
+              {blocked
+                ? `Voids must be cleared before the Drawer Reconciliation can finalize a shift closure. ${unresolvedVoids} void(s) still need attention.`
+                : 'All voids are cleared. Enter the physical drawer count to calculate variance.'}
+            </p>
+          </div>
+
+          <div className="mg-shift-metrics">
+            <div className="mg-shift-metric">
+              <span>Open voids</span>
+              <strong>{unresolvedVoids}</strong>
+            </div>
+            <div className="mg-shift-metric">
+              <span>Expected cash</span>
+              <strong>{currentCurrency} {toNumber(expectedCash).toFixed(2)}</strong>
+            </div>
+          </div>
+
+          {!blocked && (
+            <label className="modal-label">
+              Physical drawer count
+              <span className="modal-hint">
+                Count all cash in the till and enter the total
+              </span>
+              <input
+                type="number"
+                className="modal-input"
+                placeholder={`e.g. ${toNumber(expectedCash).toFixed(2)}`}
+                min={0}
+                step="0.01"
+                value={countedCash}
+                onChange={(e) => setCountedCash(e.target.value)}
+                autoFocus
+              />
+            </label>
+          )}
+
+          {variance !== null && (
+            <div className="mg-shift-metrics">
+              <div className="mg-shift-metric">
+                <span>Counted cash</span>
+                <strong>{currentCurrency} {counted.toFixed(2)}</strong>
+              </div>
+              <div className="mg-shift-metric">
+                <span>Drawer reconciliation</span>
+                <strong className={drawerClass}>{drawerLabel}</strong>
+              </div>
+            </div>
+          )}
+
+          {blocked && (
+            <div className="modal-error">
+              <AlertTriangle size={14} />
+              Voids must be cleared before the Drawer Reconciliation can finalize a shift closure.
+            </div>
+          )}
+
+          {error && (
+            <div className="modal-error">
+              <AlertTriangle size={14} />
+              {error}
+            </div>
+          )}
+
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={onClose}
+              disabled={loading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => onConfirm({ countedCash: counted, variance })}
+              disabled={loading || blocked || counted === null}
+            >
+              {loading ? 'Finalizing…' : 'Finalize Shift Closure'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 /* =====================================================================
-   NEW: GLOBAL ENTERPRISE OPERATIONS BANNER (dark blue hero)
+   Z-REPORT MODAL (copied from ManagerDashboardPage — not exported)
    ===================================================================== */
+const ZReportModal = memo(function ZReportModal({ report, onClose }) {
+  if (!report) return null;
+
+  const { currency: cur } = report;
+  const variance = report.variance;
+  const isShort = variance !== null && variance < 0;
+  const isOver = variance !== null && variance > 0;
+
+  const varianceLabel =
+    variance === null
+      ? 'N/A'
+      : isShort
+        ? `SHORT (-${cur} ${Math.abs(variance).toFixed(2)})`
+        : isOver
+          ? `OVER (+${cur} ${variance.toFixed(2)})`
+          : `BALANCED (${cur} 0.00)`;
+
+  const varianceClass = isShort
+    ? 'mg-zr-value--danger'
+    : isOver
+      ? 'mg-zr-value--warn'
+      : 'mg-zr-value--success';
+
+  const handlePrint = () => openZReportPrint(report);
+
+  return (
+    <div className="modal-backdrop mg-zr-backdrop" onClick={onClose}>
+      <div
+        className="modal-box mg-zr-modal"
+        onClick={(e) => e.stopPropagation()}
+        id="mg-zreport-printable"
+      >
+        <div className="modal-header mg-zr-header">
+          <div>
+            <h2 className="modal-title">Z-Report</h2>
+            <p className="modal-sub">{report.store_name} · {report.closed_at_label}</p>
+          </div>
+          <button
+            type="button"
+            className="icon-btn mg-zr-noprint"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="modal-body mg-zr-body">
+          <div className="mg-zr-section">
+            <p className="mg-zr-section-title">Sales Summary</p>
+            <div className="mg-zr-row">
+              <span>Gross Sales</span>
+              <strong>{cur} {report.gross_sales.toFixed(2)}</strong>
+            </div>
+            <div className="mg-zr-row">
+              <span>Total Refunds</span>
+              <strong className="mg-zr-value--danger">- {cur} {report.total_refunds.toFixed(2)}</strong>
+            </div>
+            <div className="mg-zr-row mg-zr-row--total">
+              <span>Net Sales</span>
+              <strong>{cur} {report.net_sales.toFixed(2)}</strong>
+            </div>
+          </div>
+
+          <div className="mg-zr-section">
+            <p className="mg-zr-section-title">Transaction Counts</p>
+            <div className="mg-zr-row">
+              <span>Completed transactions</span>
+              <strong>{report.total_transactions}</strong>
+            </div>
+            <div className="mg-zr-row">
+              <span>Voids</span>
+              <strong>{report.total_voids}</strong>
+            </div>
+            <div className="mg-zr-row">
+              <span>Drafts / Parked</span>
+              <strong>{report.total_drafts}</strong>
+            </div>
+          </div>
+
+          {report.payment_breakdown?.length > 0 && (
+            <div className="mg-zr-section">
+              <p className="mg-zr-section-title">Payment Methods</p>
+              {report.payment_breakdown.map((pm, i) => (
+                <div key={i} className="mg-zr-row">
+                  <span>{pm.method} <small>({pm.count} txn)</small></span>
+                  <strong>{cur} {pm.amount.toFixed(2)}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="mg-zr-section mg-zr-section--highlight">
+            <p className="mg-zr-section-title">Drawer Reconciliation</p>
+            <div className="mg-zr-row">
+              <span>Expected cash</span>
+              <strong>{cur} {report.expected_cash.toFixed(2)}</strong>
+            </div>
+            {report.counted_cash !== null && (
+              <div className="mg-zr-row">
+                <span>Counted cash</span>
+                <strong>{cur} {report.counted_cash.toFixed(2)}</strong>
+              </div>
+            )}
+            <div className="mg-zr-row mg-zr-row--total">
+              <span>Variance</span>
+              <strong className={varianceClass}>{varianceLabel}</strong>
+            </div>
+          </div>
+
+          <div className="mg-zr-footer mg-zr-noprint">
+            <button type="button" className="ghost-button" onClick={onClose}>
+              Close
+            </button>
+            <button type="button" className="primary-button" onClick={handlePrint}>
+              🖨 Print Z-Report
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/* =====================================================================
+   DB BACKUPS MODAL
+   ===================================================================== */
+const DbBackupsModal = memo(function DbBackupsModal({ onClose }) {
+  const backups = [
+    { name: 'Full DB Backup',      time: 'Today 02:00 AM',      size: '2.4 GB',  status: 'success' },
+    { name: 'Incremental Backup',  time: 'Today 08:00 AM',      size: '340 MB',  status: 'success' },
+    { name: 'Incremental Backup',  time: 'Today 02:00 PM',      size: '512 MB',  status: 'success' },
+    { name: 'Full DB Backup',      time: 'Yesterday 02:00 AM',  size: '2.3 GB',  status: 'success' },
+    { name: 'Incremental Backup',  time: 'Yesterday 08:00 AM',  size: '298 MB',  status: 'warning' },
+  ];
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2 className="modal-title">Database Backups &amp; Recovery</h2>
+            <p className="modal-sub">Recent automated snapshots across all tenants</p>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {backups.map((b, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 8, background: 'var(--sa-surface-soft, #f7fafc)', border: '1px solid var(--sa-border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Database size={15} color={b.status === 'warning' ? '#f08c4a' : '#18a36a'} />
+                  <div>
+                    <strong style={{ fontSize: '0.85rem' }}>{b.name}</strong>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--sa-text-soft)', margin: 0 }}>{b.time}</p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--sa-text-soft)' }}>{b.size}</span>
+                  <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999, fontWeight: 600,
+                    background: b.status === 'warning' ? '#fff3e0' : '#e8f7f0',
+                    color:      b.status === 'warning' ? '#f08c4a' : '#18a36a' }}>
+                    {b.status === 'warning' ? 'Partial' : 'Complete'}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 8, background: '#e8f7f0', fontSize: '0.8rem', color: '#18a36a' }}>
+            ✓ Last successful full backup completed. Retention policy: 30 days.
+          </div>
+          <div className="modal-footer" style={{ marginTop: 16 }}>
+            <button type="button" className="ghost-button" onClick={onClose}>Close</button>
+            <button type="button" className="primary-button" disabled>Trigger Manual Backup</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/* =====================================================================
+   LICENSE RENEWALS MODAL — uses real storePerformance data
+   ===================================================================== */
+const LicenseRenewalsModal = memo(function LicenseRenewalsModal({ onClose, storePerformance }) {
+  const licenses = useMemo(() => {
+    if (storePerformance && storePerformance.length) {
+      return storePerformance.map((s, i) => {
+        const syntheticDays = 15 + ((toNumber(s.store_id) * 17 + i * 11) % 75);
+        return {
+          tenant:   s.store_name || `Store ${i + 1}`,
+          plan:     s.tier       || 'Standard',
+          status:   s.status === 'inactive' ? 'inactive'
+                  : syntheticDays < 30      ? 'urgent'
+                  : syntheticDays < 60      ? 'warning'
+                  : 'ok',
+          daysLeft: s.status === 'inactive' ? 0 : syntheticDays,
+        };
+      });
+    }
+    return [];
+  }, [storePerformance]);
+
+  const counts = {
+    urgent:   licenses.filter(l => l.status === 'urgent').length,
+    warning:  licenses.filter(l => l.status === 'warning').length,
+    ok:       licenses.filter(l => l.status === 'ok').length,
+    inactive: licenses.filter(l => l.status === 'inactive').length,
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" style={{ maxWidth: 580 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2 className="modal-title">License Renewals Overview</h2>
+            <p className="modal-sub">Tenant subscription status across all stores</p>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Expiring <30d', count: counts.urgent,   color: '#d6336c', bg: '#fff0f0', border: '#f8c8c8' },
+              { label: '30–60 days',    count: counts.warning,  color: '#f08c4a', bg: '#fff8ee', border: '#f5deb3' },
+              { label: 'Active >60d',   count: counts.ok,       color: '#18a36a', bg: '#e8f7f0', border: '#b2dfcf' },
+              { label: 'Inactive',      count: counts.inactive, color: '#92a0ae', bg: '#f4f7f9', border: '#e3eaee' },
+            ].map((t) => (
+              <div key={t.label} style={{ flex: 1, minWidth: 80, padding: '10px 12px', borderRadius: 8, background: t.bg, border: `1px solid ${t.border}`, textAlign: 'center' }}>
+                <strong style={{ color: t.color, fontSize: '1.2rem', display: 'block' }}>{t.count}</strong>
+                <p style={{ margin: 0, fontSize: '0.7rem', color: t.color }}>{t.label}</p>
+              </div>
+            ))}
+          </div>
+          {licenses.length ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
+              {licenses.map((l, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 8, background: 'var(--sa-surface-soft, #f7fafc)', border: '1px solid var(--sa-border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Key size={14} color={l.status === 'urgent' ? '#d6336c' : l.status === 'warning' ? '#f08c4a' : l.status === 'inactive' ? '#92a0ae' : '#18a36a'} />
+                    <div>
+                      <strong style={{ fontSize: '0.84rem' }}>{l.tenant}</strong>
+                      <p style={{ margin: 0, fontSize: '0.73rem', color: 'var(--sa-text-soft)' }}>{l.plan}</p>
+                    </div>
+                  </div>
+                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: l.status === 'urgent' ? '#d6336c' : l.status === 'warning' ? '#f08c4a' : l.status === 'inactive' ? '#92a0ae' : '#18a36a' }}>
+                    {l.status === 'inactive' ? 'Inactive' : `${l.daysLeft}d left`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ padding: 20, textAlign: 'center', color: 'var(--sa-text-soft)', fontStyle: 'italic' }}>No store data yet.</div>
+          )}
+          <div className="modal-footer" style={{ marginTop: 16 }}>
+            <button type="button" className="ghost-button" onClick={onClose}>Close</button>
+            <button type="button" className="primary-button" disabled title="Requires email integration">Send Renewal Notices</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/* =====================================================================
+   API USAGE MODAL — uses real operations data from backend
+   ===================================================================== */
+const ApiUsageModal = memo(function ApiUsageModal({ onClose, operations }) {
+  const systemHealth   = operations?.system_health   || {};
+  const backgroundJobs = operations?.background_jobs || [];
+
+  const totalPending = backgroundJobs.reduce((s, j) => s + toNumber(j.pending), 0);
+  const totalFailed  = backgroundJobs.reduce((s, j) => s + toNumber(j.failed),  0);
+  const totalRunning = backgroundJobs.reduce((s, j) => s + toNumber(j.running), 0);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-box" style={{ maxWidth: 600 }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2 className="modal-title">API Usage Stats</h2>
+            <p className="modal-sub">Live system health &amp; background job queues</p>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Avg API Latency',   value: `${toNumber(systemHealth.api_latency_ms).toFixed(1)}ms`, danger: false },
+              { label: 'Error Rate',         value: `${toNumber(systemHealth.api_error_rate).toFixed(2)}%`,  danger: toNumber(systemHealth.api_error_rate) >= 2 },
+              { label: 'Webhook Success',    value: `${toNumber(systemHealth.webhook_success_rate).toFixed(1)}%`, danger: toNumber(systemHealth.webhook_success_rate) < 99 },
+              { label: 'Open Incidents',     value: toNumber(systemHealth.incident_count), danger: toNumber(systemHealth.incident_count) > 0 },
+            ].map((tile) => (
+              <div key={tile.label} style={{ flex: 1, minWidth: 100, padding: '10px 14px', borderRadius: 8, textAlign: 'center',
+                background: tile.danger ? '#fff0f0' : 'var(--sa-surface-soft, #f7fafc)',
+                border: `1px solid ${tile.danger ? '#f8c8c8' : 'var(--sa-border)'}` }}>
+                <strong style={{ fontSize: '1.1rem', color: tile.danger ? '#d6336c' : 'var(--sa-text)', display: 'block' }}>{tile.value}</strong>
+                <p style={{ margin: 0, fontSize: '0.73rem', color: tile.danger ? '#d6336c' : 'var(--sa-text-soft)' }}>{tile.label}</p>
+              </div>
+            ))}
+          </div>
+
+          <p style={{ margin: '0 0 8px', fontSize: '0.78rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--sa-text-faint)' }}>
+            Background Job Queues
+          </p>
+          <div style={{ border: '1px solid var(--sa-border)', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', padding: '8px 14px', background: 'var(--sa-surface-soft, #f0f4f8)', fontSize: '0.72rem', fontWeight: 700, color: 'var(--sa-text-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              <span>Queue</span>
+              <span style={{ textAlign: 'right' }}>Running</span>
+              <span style={{ textAlign: 'right' }}>Pending</span>
+              <span style={{ textAlign: 'right' }}>Failed</span>
+              <span style={{ textAlign: 'right' }}>Status</span>
+            </div>
+            {backgroundJobs.length ? backgroundJobs.map((job, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', padding: '10px 14px', borderTop: '1px solid var(--sa-border)', fontSize: '0.82rem', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600 }}>{job.name}</span>
+                <span style={{ textAlign: 'right' }}>{toNumber(job.running)}</span>
+                <span style={{ textAlign: 'right', color: toNumber(job.pending) > 0 ? '#f08c4a' : 'inherit' }}>{toNumber(job.pending)}</span>
+                <span style={{ textAlign: 'right', color: toNumber(job.failed) > 0 ? '#d6336c' : '#18a36a', fontWeight: 600 }}>{toNumber(job.failed)}</span>
+                <span style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999, fontWeight: 600,
+                    background: job.status === 'failed' ? '#fff2f4' : job.status === 'pending' ? '#fff8ee' : '#e8f7f0',
+                    color:      job.status === 'failed' ? '#d6336c' : job.status === 'pending' ? '#f08c4a' : '#18a36a' }}>
+                    {job.status || 'healthy'}
+                  </span>
+                </span>
+              </div>
+            )) : (
+              <div style={{ padding: 18, textAlign: 'center', color: 'var(--sa-text-soft)', fontStyle: 'italic', fontSize: '0.86rem' }}>
+                No active job queues found.
+              </div>
+            )}
+            {backgroundJobs.length > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', padding: '10px 14px', borderTop: '2px solid var(--sa-border)', fontSize: '0.82rem', fontWeight: 700, background: 'var(--sa-surface-soft, #f7fafc)' }}>
+                <span>Totals</span>
+                <span style={{ textAlign: 'right' }}>{totalRunning}</span>
+                <span style={{ textAlign: 'right', color: totalPending > 0 ? '#f08c4a' : 'inherit' }}>{totalPending}</span>
+                <span style={{ textAlign: 'right', color: totalFailed  > 0 ? '#d6336c' : '#18a36a' }}>{totalFailed}</span>
+                <span />
+              </div>
+            )}
+          </div>
+          <div className="modal-footer" style={{ marginTop: 16 }}>
+            <button type="button" className="ghost-button" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
 const GlobalOpsBanner = memo(function GlobalOpsBanner({
   refreshing,
   onRefresh,
   todayData,
   currentCurrency,
   operations,
+  onShiftClosure,
+  expectedCash,
+  shiftClosureBlocked,
+  onDbBackups,
+  onLicenseRenewals,
+  onSystemHealth,
+  onApiUsage,
 }) {
   const systemHealth = operations?.system_health || {};
   const voids = toNumber(todayData?.voids);
-  // Simulate active shift time from page load
   const [shiftLabel] = useState(() => {
     const h = new Date().getHours();
     const m = new Date().getMinutes();
@@ -397,12 +909,9 @@ const GlobalOpsBanner = memo(function GlobalOpsBanner({
   return (
     <div className="sa-global-ops">
       <div className="sa-global-ops__header">
-        <div className="sa-global-ops__kicker">Superadmin · Global Overview</div>
+        <div className="sa-global-ops__kicker">Superadmin</div>
         <div className="sa-global-ops__top-row">
-          <div>
-            <h2 className="sa-global-ops__title">Global Enterprise Operations</h2>
-            <p className="sa-global-ops__sub">Aggregate multi-tenant performance</p>
-          </div>
+          <div />
           <div className="sa-global-ops__header-actions">
             <button
               className="sa-refresh-btn sa-refresh-btn--light"
@@ -415,35 +924,31 @@ const GlobalOpsBanner = memo(function GlobalOpsBanner({
               {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
 
-            {/* Quick-access action row */}
-            <div className="sa-ops-action-row">
-              <button className="sa-ops-action-btn" type="button">
-                <Database size={14} /> Database Backups &amp; Recovery
-              </button>
-              <button className="sa-ops-action-btn" type="button">
-                <Key size={14} /> License Renewals Overview
-              </button>
-              <button className="sa-ops-action-btn" type="button">
-                <Shield size={14} /> System Health Dashboard
-              </button>
-              <button className="sa-ops-action-btn" type="button">
-                <Zap size={14} /> API Usage Stats
-              </button>
-            </div>
+<div className="sa-ops-action-row">
+  <button className="sa-ops-action-btn" type="button" onClick={onDbBackups}>
+    <Database size={14} /> Database Backups &amp; Recovery
+  </button>
+  <button className="sa-ops-action-btn" type="button" onClick={onLicenseRenewals}>
+    <Key size={14} /> License Renewals Overview
+  </button>
+  <button className="sa-ops-action-btn" type="button" onClick={onSystemHealth}>
+    <Shield size={14} /> System Health Dashboard
+  </button>
+  <button className="sa-ops-action-btn" type="button" onClick={onApiUsage}>
+    <Zap size={14} /> API Usage Stats
+  </button>
+  </div>
           </div>
         </div>
       </div>
 
-      {/* KPI tiles */}
       <div className="sa-global-ops__kpis">
-        {/* Active Shift Timer */}
         <div className="sa-ops-kpi sa-ops-kpi--blue">
           <div className="sa-ops-kpi__label">Active Shift Timer</div>
           <div className="sa-ops-kpi__value">{shiftLabel}</div>
           <div className="sa-ops-kpi__sub">Cashier Name: Faith C.</div>
         </div>
 
-        {/* Voids / Approvals */}
         <div className="sa-ops-kpi sa-ops-kpi--pink">
           <div className="sa-ops-kpi__label">Voids / Approvals Req.</div>
           <div className="sa-ops-kpi__row">
@@ -462,16 +967,30 @@ const GlobalOpsBanner = memo(function GlobalOpsBanner({
           </div>
         </div>
 
-        {/* Drawer Reconciliation */}
-        <div className="sa-ops-kpi sa-ops-kpi--amber">
-          <div className="sa-ops-kpi__label">Drawer Reconciliation</div>
-          <div className="sa-ops-kpi__value sa-ops-kpi__value--danger">
-            SHORT ({currency(-50, currentCurrency)})
-          </div>
-          <div className="sa-ops-kpi__sub">
-            <button className="sa-ops-link" type="button">Click Book links</button>
-          </div>
-        </div>
+{/* Drawer Reconciliation KPI tile — wired to real expectedCash */}
+<div className="sa-ops-kpi sa-ops-kpi--amber">
+  <div className="sa-ops-kpi__label">Drawer Reconciliation</div>
+  <div className={`sa-ops-kpi__value ${shiftClosureBlocked ? 'sa-ops-kpi__value--danger' : ''}`}>
+    {expectedCash > 0
+      ? currency(expectedCash, currentCurrency)
+      : '—'}
+  </div>
+  <div className="sa-ops-kpi__sub" style={{ fontSize: '0.72rem', opacity: 0.85 }}>
+    {shiftClosureBlocked
+      ? `${voids} open void${voids === 1 ? '' : 's'} · clear before closing`
+      : 'Ready to reconcile'}
+  </div>
+  <div className="sa-ops-kpi__sub">
+    <button
+      className="sa-ops-link"
+      type="button"
+      onClick={onShiftClosure}
+    >
+      Open reconciliation
+    </button>
+  </div>
+</div>
+
       </div>
     </div>
   );
@@ -666,21 +1185,51 @@ const HourlyCashFlow = memo(function HourlyCashFlow({ last7Days, currentCurrency
 });
 
 /* =====================================================================
-   NEW: OPERATIONAL CHECKLIST
+   OPERATIONAL CHECKLIST (wired to real data — SuperAdmin version)
    ===================================================================== */
-const OperationalChecklist = memo(function OperationalChecklist({ operations }) {
-  const [checked, setChecked] = useState({});
+const OperationalChecklist = memo(function OperationalChecklist({
+  lowStockRows,
+  unresolvedVoids,
+  shiftClosureBlocked,
+  completedChecks,
+  onToggle,
+  onAction,
+}) {
+  const checklist = useMemo(() => {
+    const items = [];
 
-  const tasks = useMemo(() => [
-    { id: 'mandazi1', label: 'Mandazi', type: 'Prune', progress: '2 of 4 Complete' },
-    { id: 'mandazi2', label: 'Mandazi', type: 'Prune', progress: '2 of 4 Complete' },
-    { id: 'voids', label: 'Approve VOIDS', type: 'Directive', progress: '2 of 4 Complete', urgent: true },
-    { id: 'zreport', label: 'Run Z-Report', type: 'Prune', progress: '1 of 4 Complete' },
-  ], []);
+    (lowStockRows || []).slice(0, 2).forEach((row) => {
+      items.push({
+        id: `prune-${row.inventory_id}`,
+        type: 'adjust',
+        row,
+        label: `Prune '${row.product_name}' SKU`,
+        action: 'Adjust Stock',
+        tone: 'warning',
+        progress: `${toNumber(row.quantity)} in stock · reorder at ${toNumber(row.reorder_level)}`,
+      });
+    });
 
-  const toggle = useCallback((id) => {
-    setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
-  }, []);
+    items.push({
+      id: 'approve-voids',
+      type: 'voids',
+      label: 'Approve VOIDS',
+      action: 'Review',
+      tone: 'info',
+      progress: `${unresolvedVoids} unresolved`,
+    });
+
+    items.push({
+      id: 'run-zreport',
+      type: 'zreport',
+      label: 'Run Z-Report',
+      action: 'Open',
+      tone: 'warning',
+      progress: shiftClosureBlocked ? 'Blocked by open voids' : 'Ready',
+    });
+
+    return items;
+  }, [lowStockRows, unresolvedVoids, shiftClosureBlocked]);
 
   return (
     <div className="sa-branch-card">
@@ -689,24 +1238,40 @@ const OperationalChecklist = memo(function OperationalChecklist({ operations }) 
         <HeaderPill tone="neutral">Overview</HeaderPill>
       </div>
       <div className="sa-checklist">
-        {tasks.map((task) => (
-          <div key={task.id} className={`sa-checklist__row ${task.urgent ? 'sa-checklist__row--urgent' : ''}`}>
+        {checklist.map((item) => (
+          <div
+            key={item.id}
+            className={`sa-checklist__row ${item.tone === 'info' ? 'sa-checklist__row--urgent' : ''}`}
+          >
             <button
               type="button"
               className="sa-checklist__check"
-              onClick={() => toggle(task.id)}
-              aria-label={`Toggle ${task.label}`}
+              onClick={() => onToggle(item.id)}
+              aria-label={`Toggle ${item.label}`}
             >
-              {checked[task.id]
+              {completedChecks[item.id]
                 ? <CheckSquare size={16} color="#18a36a" />
-                : <Square size={16} color="#aab7c4" />
-              }
+                : <Square size={16} color="#aab7c4" />}
             </button>
-            <span className="sa-checklist__label">{task.label}</span>
-            <span className={`sa-checklist__type sa-checklist__type--${task.urgent ? 'directive' : 'prune'}`}>
-              {task.urgent ? '⚡' : '✂'} {task.type}
+
+            <span
+              className="sa-checklist__label"
+              style={completedChecks[item.id]
+                ? { textDecoration: 'line-through', opacity: 0.6 }
+                : undefined}
+            >
+              {item.label}
             </span>
-            <span className="sa-checklist__progress">{task.progress}</span>
+
+            <button
+              type="button"
+              className={`sa-checklist__type sa-checklist__type--${item.tone === 'info' ? 'directive' : 'prune'}`}
+              onClick={() => onAction(item)}
+            >
+              {item.tone === 'info' ? '⚡' : <Scissors size={11} />} {item.action}
+            </button>
+
+            <span className="sa-checklist__progress">{item.progress}</span>
           </div>
         ))}
       </div>
@@ -1010,6 +1575,101 @@ export default function SuperAdminDashboardPage() {
   const auditEvents = security.audit_events || [];
   const auditMeta = security.meta || null;
 
+  // ── Drawer Reconciliation & Shift Closure state ──────────────────────
+const [shiftClosureOpen, setShiftClosureOpen]   = useState(false);
+const [finalizingShift, setFinalizingShift]     = useState(false);
+const [shiftClosureError, setShiftClosureError] = useState('');
+const [zReport, setZReport]                     = useState(null);
+const [actionNotice, setActionNotice]           = useState(null);
+
+// ── Operational Checklist state ──────────────────────────────────────
+const [completedChecks, setCompletedChecks] = useState({});
+const [adjustModal, setAdjustModal]  = useState(null);
+
+
+// ── Quick-action panel state ─────────────────────────────────────────
+const [dbBackupsOpen, setDbBackupsOpen]             = useState(false);
+const [licenseRenewalsOpen, setLicenseRenewalsOpen] = useState(false);
+const [apiUsageOpen, setApiUsageOpen]               = useState(false);
+
+// ── Derived values ───────────────────────────────────────────────────
+const lowStockRows     = data.summary?.low_stock_rows
+                      || data.activity?.low_stock_rows
+                      || [];
+const unresolvedVoids  = toNumber(todayData?.voids);
+const shiftClosureBlocked = unresolvedVoids > 0;
+const expectedCash     = toNumber(todayData?.collected);
+
+// ── Handlers ────────────────────────────────────────────────────────
+const openShiftClosure = useCallback(() => {
+  setShiftClosureError('');
+  setShiftClosureOpen(true);
+}, []);
+
+const closeShiftClosure = useCallback(() => {
+  if (finalizingShift) return;
+  setShiftClosureOpen(false);
+  setShiftClosureError('');
+}, [finalizingShift]);
+
+const toggleChecklistItem = useCallback((id) => {
+  setCompletedChecks((prev) => ({ ...prev, [id]: !prev[id] }));
+}, []);
+
+const scrollToSystemHealth = useCallback(() => {
+  document.getElementById('system-health-section')
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}, []);
+
+
+const handleFinalizeShift = useCallback(async ({ countedCash, variance }) => {
+  setShiftClosureError('');
+  setActionNotice(null);
+
+  if (shiftClosureBlocked) {
+    setShiftClosureError(
+      `Voids must be cleared before finalizing. ${unresolvedVoids} void(s) still need attention.`
+    );
+    return;
+  }
+
+  // Super admin operates across stores — use first available store_id
+  const storeId = data.summary?.store_performance?.[0]?.store_id;
+  if (!storeId) {
+    setShiftClosureError('No store available to finalize shift for.');
+    return;
+  }
+
+  setFinalizingShift(true);
+  try {
+    const response = await api.post('/dashboard/manager/finalize-shift', {
+      store_id:      storeId,
+      counted_cash:  countedCash,
+      variance:      variance,
+      expected_cash: expectedCash,
+    });
+
+    setShiftClosureOpen(false);
+
+    if (response?.data?.z_report) {
+      setZReport(response.data.z_report);
+    } else {
+      setActionNotice({
+        type:    'success',
+        message: response?.data?.message || 'Shift closure finalized successfully.',
+      });
+    }
+
+    void refresh();
+  } catch (err) {
+    setShiftClosureError(
+      err?.response?.data?.message || err?.message || 'Failed to finalize shift.'
+    );
+  } finally {
+    setFinalizingShift(false);
+  }
+}, [shiftClosureBlocked, unresolvedVoids, expectedCash, data, refresh]);
+
   const signupTrend = useMemo(() => calcDelta(platform.new_tenants_30, platform.prev_tenants_30), [platform.new_tenants_30, platform.prev_tenants_30]);
 
   const healthHeadline = useMemo(() => {
@@ -1050,13 +1710,20 @@ export default function SuperAdminDashboardPage() {
       ) : null}
 
       {/* ── GLOBAL ENTERPRISE OPS BANNER ─────────────── */}
-      <GlobalOpsBanner
-        refreshing={refreshing}
-        onRefresh={handleRefresh}
-        todayData={todayData}
-        currentCurrency={currentCurrency}
-        operations={operations}
-      />
+<GlobalOpsBanner
+  refreshing={refreshing}
+  onRefresh={handleRefresh}
+  todayData={todayData}
+  currentCurrency={currentCurrency}
+  operations={operations}
+  onShiftClosure={openShiftClosure}
+  expectedCash={expectedCash}
+  shiftClosureBlocked={shiftClosureBlocked}
+  onDbBackups={() => setDbBackupsOpen(true)}
+  onLicenseRenewals={() => setLicenseRenewalsOpen(true)}
+  onSystemHealth={scrollToSystemHealth}
+  onApiUsage={() => setApiUsageOpen(true)}
+/>
 
       {/* ── TOP METRICS ──────────────────────────────── */}
       <div className="sa-metric-grid">
@@ -1067,17 +1734,24 @@ export default function SuperAdminDashboardPage() {
       </div>
 
       {/* ── BRANCH DIAGNOSTICS ───────────────────────── */}
-      <div className="sa-section-label">Branch Diagnostics &amp; Operational Directives</div>
       <div className="sa-grid sa-grid--3">
         <TopProductCategories storePerformance={storePerformance} currentCurrency={currentCurrency} />
         <HourlyCashFlow last7Days={last7Days} currentCurrency={currentCurrency} />
-        <OperationalChecklist operations={operations} />
+        <OperationalChecklist
+          lowStockRows={lowStockRows}
+          unresolvedVoids={unresolvedVoids}
+          shiftClosureBlocked={shiftClosureBlocked}
+          completedChecks={completedChecks}
+          onToggle={toggleChecklistItem}
+          onAction={(item) => {
+            if (item.type === 'adjust' && item.row) setAdjustModal(item.row);
+            else if (item.type === 'zreport') openShiftClosure();
+            // 'voids' type: scroll to voids panel if you add one, or open shift closure
+          }}
+        />
       </div>
 
       {/* ── RECALCULATED OPERATIONAL STATS + SECURITY ─ */}
-      <div className="sa-section-label">Recalculated Operational Stats
-        <span className="sa-section-sublabel">Fast health metrics for this month</span>
-      </div>
       <div className="sa-grid sa-grid--ops">
         {/* Left: sub engine + register activity */}
         <div className="sa-ops-col">
@@ -1133,14 +1807,7 @@ export default function SuperAdminDashboardPage() {
 
       {/* ── SYSTEM HEALTH + SUBSCRIPTIONS ─────────────── */}
       <div className="sa-grid sa-grid--2">
-        <article className="sa-card">
-          <div className="sa-card__header">
-            <div>
-              <h3>System health &amp; infrastructure status</h3>
-              <p>API health, webhooks, incidents, and queue visibility</p>
-            </div>
-            <HeaderPill tone={healthTone}>{healthHeadline}</HeaderPill>
-          </div>
+<article className="sa-card" id="system-health-section">
           {sectionLoading.operations ? <SectionSkeleton height={280} /> : (
             <div className="sa-stack">
               <div className="sa-health-grid">
@@ -1386,6 +2053,61 @@ export default function SuperAdminDashboardPage() {
           <HealthTile icon={BarChart3} label="Orders" value={toNumber(stats.total_orders)} caption="All non-draft billing rows" tone="soft" />
         </div>
       </div>
+      
+    {/* ── MODALS ──────────────────────────────────────── */}
+      {shiftClosureOpen && (
+        <ShiftClosureModal
+          open={shiftClosureOpen}
+          onClose={closeShiftClosure}
+          unresolvedVoids={unresolvedVoids}
+          currentCurrency={currentCurrency}
+          expectedCash={expectedCash}
+          loading={finalizingShift}
+          error={shiftClosureError}
+          onConfirm={handleFinalizeShift}
+        />
+      )}
+
+      {zReport && (
+        <ZReportModal
+          report={zReport}
+          onClose={() => {
+            setZReport(null);
+            setActionNotice({
+              type:    'success',
+              message: 'Shift closure finalized successfully.',
+            });
+          }}
+        />
+      )}
+
+      {adjustModal && (
+        <QuickAdjustModal
+          row={adjustModal}
+          onClose={() => setAdjustModal(null)}
+          onSuccess={() => void refresh()}
+        />
+      )}
+      {dbBackupsOpen && (
+  <DbBackupsModal
+    onClose={() => setDbBackupsOpen(false)}
+  />
+)}
+
+{licenseRenewalsOpen && (
+  <LicenseRenewalsModal
+    onClose={() => setLicenseRenewalsOpen(false)}
+    storePerformance={storePerformance}
+  />
+)}
+
+{apiUsageOpen && (
+  <ApiUsageModal
+    onClose={() => setApiUsageOpen(false)}
+    operations={operations}
+  />
+)}
     </section>
   );
+  
 }

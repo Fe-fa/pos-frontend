@@ -517,6 +517,11 @@ export default function AdminProductsPage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+const [showCategoryModal, setShowCategoryModal] = useState(false);
+const [bulkCategoryId, setBulkCategoryId] = useState('');
+const [showTaxModal, setShowTaxModal] = useState(false);
+const [bulkVatRate, setBulkVatRate] = useState('');
+
   const [liveTime, setLiveTime] = useState(formatLiveTime());
 
   const categoriesRequestRef = useRef(0);
@@ -914,25 +919,24 @@ export default function AdminProductsPage() {
     }
   }, []);
 
-  const handleToggleActive = useCallback(async (product) => {
-    const id = getProductId(product);
-    if (!id) return;
+const handleToggleActive = useCallback(async (product) => {
+  const id = getProductId(product);
+  if (!id) return;
 
-    try {
-      const formData = new FormData();
-      formData.append('store_id', String(Number(product.store_id || storeId)));
-      formData.append('is_active', product.is_active ? '0' : '1');
-      formData.append('_method', 'PUT');
-      await productService.update(id, formData);
-      await loadProducts({
-        storeId, page, search: debouncedSearch, perPage,
-        categoryFilter, taxClassFilter, statusFilter,
-      });
-    } catch (err) {
-      setError(formatApiError(err) || 'Unable to toggle product status.');
-    }
-  }, [storeId, page, debouncedSearch, perPage,
-      categoryFilter, taxClassFilter, statusFilter, loadProducts]);
+  try {
+    await productService.patch(id, {
+      store_id: Number(product.store_id || storeId),
+      is_active: product.is_active ? 0 : 1,
+    });
+    await loadProducts({
+      storeId, page, search: debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter,
+    });
+  } catch (err) {
+    setError(formatApiError(err) || 'Unable to toggle product status.');
+  }
+}, [storeId, page, debouncedSearch, perPage,
+    categoryFilter, taxClassFilter, statusFilter, loadProducts]);
 
   const handleSearchChange = useCallback((e) => {
     const nextValue = e.target.value;
@@ -981,14 +985,91 @@ export default function AdminProductsPage() {
     return allIds.length > 0 && allIds.every((id) => selectedIds.has(id));
   }, [products, selectedIds]);
 
-  /* ── Bulk actions ── */
-  const handleBulkClone = useCallback(async () => {
-    if (selectedIds.size === 0) return;
-    if (!window.confirm(`Clone ${selectedIds.size} selected product(s)?`)) return;
-    // Implementation: would call a bulk-clone API. Here, just notify.
-    alert('Bulk clone action — wire to your backend bulk endpoint.');
+/* ── Bulk actions ── */
+const handleBulkClone = useCallback(async () => {
+  if (selectedIds.size === 0) return;
+  if (!window.confirm(`Clone ${selectedIds.size} selected product(s)?`)) return;
+  try {
+    const selected = products.filter((p) => selectedIds.has(getProductId(p)));
+    await Promise.all(
+      selected.map((p) => {
+        const formData = new FormData();
+        formData.append('store_id', String(Number(p.store_id || storeId)));
+        formData.append('category_id', String(Number(p.category_id)));
+        formData.append('sku', `${p.sku}-COPY`);
+        formData.append('product_name', `${p.product_name} (Copy)`);
+        formData.append('description', p.description || '');
+        formData.append('price', String(Number(p.price)));
+        formData.append('cost_price', String(Number(p.cost_price)));
+        formData.append('vat_rate', String(Number(p.vat_rate || 0)));
+        formData.append('is_active', p.is_active ? '1' : '0');
+        if (p.image_url) formData.append('image_url', p.image_url);
+        return productService.create(formData);
+      })
+    );
     clearSelection();
-  }, [selectedIds, clearSelection]);
+    await loadProducts({ storeId, page, search: debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter });
+  } catch (err) {
+    setError(formatApiError(err) || 'Bulk clone failed.');
+  }
+}, [selectedIds, products, storeId, page, debouncedSearch, perPage,
+    categoryFilter, taxClassFilter, statusFilter, loadProducts, clearSelection]);
+
+const handleBulkChangeCategory = useCallback(() => {
+  if (selectedIds.size === 0) return;
+  setBulkCategoryId('');
+  setShowCategoryModal(true);
+}, [selectedIds]);
+
+const handleBulkCategorySubmit = useCallback(async () => {
+  if (!bulkCategoryId) return;
+  try {
+    await Promise.all(
+      Array.from(selectedIds).map((id) => {
+        const formData = new FormData();
+        formData.append('category_id', String(Number(bulkCategoryId)));
+        formData.append('_method', 'PUT');
+        return productService.update(id, formData);
+      })
+    );
+    setShowCategoryModal(false);
+    clearSelection();
+    await loadProducts({ storeId, page, search: debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter });
+  } catch (err) {
+    setError(formatApiError(err) || 'Bulk category update failed.');
+  }
+}, [bulkCategoryId, selectedIds, storeId, page, debouncedSearch, perPage,
+    categoryFilter, taxClassFilter, statusFilter, loadProducts, clearSelection]);
+
+const handleBulkApplyTaxRate = useCallback(() => {
+  if (selectedIds.size === 0) return;
+  setBulkVatRate('');
+  setShowTaxModal(true);
+}, [selectedIds]);
+
+const handleBulkTaxSubmit = useCallback(async () => {
+  const rate = parseFloat(bulkVatRate);
+  if (isNaN(rate) || rate < 0) return;
+  try {
+    await Promise.all(
+      Array.from(selectedIds).map((id) => {
+        const formData = new FormData();
+        formData.append('vat_rate', String(rate));
+        formData.append('_method', 'PUT');
+        return productService.update(id, formData);
+      })
+    );
+    setShowTaxModal(false);
+    clearSelection();
+    await loadProducts({ storeId, page, search: debouncedSearch, perPage,
+      categoryFilter, taxClassFilter, statusFilter });
+  } catch (err) {
+    setError(formatApiError(err) || 'Bulk tax rate update failed.');
+  }
+}, [bulkVatRate, selectedIds, storeId, page, debouncedSearch, perPage,
+    categoryFilter, taxClassFilter, statusFilter, loadProducts, clearSelection]);
 
   const handleBulkExport = useCallback(() => {
     if (selectedIds.size === 0) return;
@@ -1017,15 +1098,15 @@ export default function AdminProductsPage() {
     URL.revokeObjectURL(url);
   }, [products, selectedIds]);
 
-  const handleBulkChangeCategory = useCallback(() => {
-    if (selectedIds.size === 0) return;
-    alert('Bulk change category — wire to your backend bulk endpoint.');
-  }, [selectedIds]);
+  // const handleBulkChangeCategory = useCallback(() => {
+  //   if (selectedIds.size === 0) return;
+  //   alert('Bulk change category — wire to your backend bulk endpoint.');
+  // }, [selectedIds]);
 
-  const handleBulkApplyTaxRate = useCallback(() => {
-    if (selectedIds.size === 0) return;
-    alert('Bulk apply tax rate — wire to your backend bulk endpoint.');
-  }, [selectedIds]);
+  // const handleBulkApplyTaxRate = useCallback(() => {
+  //   if (selectedIds.size === 0) return;
+  //   alert('Bulk apply tax rate — wire to your backend bulk endpoint.');
+  // }, [selectedIds]);
 
   const tableRows = useMemo(
     () =>
@@ -1094,7 +1175,7 @@ export default function AdminProductsPage() {
             <div className="pp-summary-body">
               <span className="pp-summary-label">Total Active SKUs</span>
               <strong className="pp-summary-value">{stats.total_active_skus}</strong>
-              <a className="pp-drilldown" href="#">Drill down ›</a>
+              {/* <a className="pp-drilldown" href="#">Drill down ›</a> */}
             </div>
           </div>
 
@@ -1107,7 +1188,7 @@ export default function AdminProductsPage() {
               <strong className="pp-summary-value">
                 {currency(stats.total_catalog_value, currencyCode)}
               </strong>
-              <a className="pp-drilldown" href="#">Drill down ›</a>
+              {/* <a className="pp-drilldown" href="#">Drill down ›</a> */}
             </div>
           </div>
 
@@ -1121,7 +1202,7 @@ export default function AdminProductsPage() {
                 <span>{stats.missing_image_count} items missing image</span>
                 <span>{stats.missing_barcode_count} missing barcodes</span>
               </div>
-              <a className="pp-drilldown" href="#">Drill down ›</a>
+              {/* <a className="pp-drilldown" href="#">Drill down ›</a> */}
             </div>
           </div>
         </div>
@@ -1316,6 +1397,79 @@ export default function AdminProductsPage() {
         onImageUrlChange={handleImageUrlChange}
         onClearImage={clearCurrentImage}
       />
+            {showCategoryModal && (
+        <div className="modal-backdrop" onClick={() => setShowCategoryModal(false)}>
+          <div className="modal-card form-modal-card" style={{ maxWidth: 380 }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Change Category</h3>
+                <p className="muted">Apply to {selectedIds.size} selected product(s).</p>
+              </div>
+              <button type="button" className="icon-button"
+                onClick={() => setShowCategoryModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-content" style={{ display: 'grid', gap: 14 }}>
+              <label>
+                New category
+                <select className="select-input" value={bulkCategoryId}
+                  onChange={(e) => setBulkCategoryId(e.target.value)}>
+                  <option value="">Select category</option>
+                  {categories.map((c) => (
+                    <option key={c.category_id} value={c.category_id}>
+                      {c.category_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="catalog-modal-actions">
+                <button type="button" className="ghost-button"
+                  onClick={() => setShowCategoryModal(false)}>Cancel</button>
+                <button type="button" className="catalog-primary-btn"
+                  onClick={handleBulkCategorySubmit}
+                  disabled={!bulkCategoryId}>Apply</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk Apply Tax Rate Modal ── */}
+      {showTaxModal && (
+        <div className="modal-backdrop" onClick={() => setShowTaxModal(false)}>
+          <div className="modal-card form-modal-card" style={{ maxWidth: 380 }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Apply Tax Rate</h3>
+                <p className="muted">Set VAT for {selectedIds.size} selected product(s).</p>
+              </div>
+              <button type="button" className="icon-button"
+                onClick={() => setShowTaxModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-content" style={{ display: 'grid', gap: 14 }}>
+              <label>
+                VAT rate (%) — use 0 to remove VAT
+                <input className="text-input" type="number" min="0" step="0.01"
+                  placeholder="e.g. 16"
+                  value={bulkVatRate}
+                  onChange={(e) => setBulkVatRate(e.target.value)} />
+              </label>
+              <div className="catalog-modal-actions">
+                <button type="button" className="ghost-button"
+                  onClick={() => setShowTaxModal(false)}>Cancel</button>
+                <button type="button" className="catalog-primary-btn"
+                  onClick={handleBulkTaxSubmit}
+                  disabled={bulkVatRate === ''}>Apply</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

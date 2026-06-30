@@ -41,9 +41,7 @@ function groupVatSummary(items = []) {
 const stripTrailingSlash = (value = '') => String(value).replace(/\/+$/, '');
 
 const resolveApiBaseUrl = () => {
-  const envBaseUrl = stripTrailingSlash(
-    import.meta.env.VITE_API_BASE_URL
-  );
+  const envBaseUrl = stripTrailingSlash(import.meta.env.VITE_API_BASE_URL);
 
   if (envBaseUrl) return envBaseUrl;
 
@@ -72,11 +70,55 @@ export const downloadBillingDocument = (billing, mode = 'receipt') => {
   link.remove();
 };
 
+const getUsablePrintWindow = (existingWindow, features = 'width=320,height=900') => {
+  if (existingWindow && !existingWindow.closed) return existingWindow;
+  return window.open('', '_blank', features);
+};
+
+const triggerPrint = (printWindow, delayMs = 300, closeAfterPrint = false) => {
+  window.setTimeout(() => {
+    try {
+      printWindow.focus();
+      printWindow.print();
+
+      if (closeAfterPrint) {
+        window.setTimeout(() => {
+          try {
+            if (!printWindow.closed) printWindow.close();
+          } catch {
+            /* ignore */
+          }
+        }, 250);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, Number(delayMs || 300));
+};
+
+const runWhenDocumentReady = (printWindow, callback) => {
+  const run = () => {
+    try {
+      callback();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  if (printWindow.document.readyState === 'complete') {
+    window.setTimeout(run, 0);
+    return;
+  }
+
+  printWindow.onload = run;
+};
+
 export function openBillingPrint(
   billing,
   currentStore,
   mode = 'receipt',
-  storeSettings = {}
+  storeSettings = {},
+  existingWindow = null
 ) {
   if (!billing) return;
 
@@ -85,44 +127,45 @@ export function openBillingPrint(
       ? storeSettings
       : mergeStoreSettings(billing.store ?? currentStore);
 
-
-
   const store = { ...currentStore, ...billing.store };
   const payment = billing.payments?.[billing.payments.length - 1];
+  const storeCurrency = store?.currency || currentStore?.currency || 'KES';
 
   const isPaid = Number(billing?.balance_due || 0) <= 0;
 
   const documentNumber =
     mode === 'invoice'
-      ? billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT')
+      ? billing.invnumber ||
+        payment?.receiptnumber ||
+        (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT')
       : isPaid
-        ? payment?.receiptnumber || billing.invnumber || (billing.billing_id ? `RCT-${billing.billing_id}` : 'DRAFT')
-        : billing.invnumber || payment?.receiptnumber || (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT');
+        ? payment?.receiptnumber ||
+          billing.invnumber ||
+          (billing.billing_id ? `RCT-${billing.billing_id}` : 'DRAFT')
+        : billing.invnumber ||
+          payment?.receiptnumber ||
+          (billing.billing_id ? `INV-${billing.billing_id}` : 'DRAFT');
 
   const documentLabel = mode === 'receipt' && isPaid ? 'Receipt No' : 'Invoice No';
 
   const barcodeValue = documentNumber;
-  const qrUrl =
-    resolvePublicDocumentUrl(billing, mode, 'view') ||
-    `${window.location.origin}`;
+  const qrUrl = resolvePublicDocumentUrl(billing, mode, 'view') || `${window.location.origin}`;
 
   const footerText =
     mode === 'invoice'
       ? settings.invoice_footer || 'Goods once sold are not returnable.'
       : isPaid
         ? settings.receipt_footer || 'Thank you for your purchase.'
-        : `Balance due: ${currency(Number(billing?.balance_due || 0), store?.currency || 'KES')}. Please settle your outstanding balance.`;
+        : `Balance due: ${currency(
+            Number(billing?.balance_due || 0),
+            storeCurrency
+          )}. Please settle your outstanding balance.`;
 
   const headerText =
-    mode === 'invoice'
-      ? settings.invoice_header || ''
-      : settings.receipt_header || '';
+    mode === 'invoice' ? settings.invoice_header || '' : settings.receipt_header || '';
 
-  const documentTitle = mode === 'invoice'
-    ? 'Tax Invoice'
-    : isPaid
-      ? 'Sales Receipt'
-      : 'Payment Receipt';
+  const documentTitle =
+    mode === 'invoice' ? 'Tax Invoice' : isPaid ? 'Sales Receipt' : 'Payment Receipt';
 
   const vatRows = groupVatSummary(billing.items || []);
   const netAmount = Number(billing.subtotal || 0);
@@ -132,10 +175,15 @@ export function openBillingPrint(
   const balanceDue = Number(billing.balance_due || 0);
   const pointsDiscount = Number(billing.points_discount || 0);
 
-  const loyaltyPointsBefore = Number(billing.customer?.loyalty_points_before ?? billing.customer?.loyalty_points ?? 0);
+  const loyaltyPointsBefore = Number(
+    billing.customer?.loyalty_points_before ?? billing.customer?.loyalty_points ?? 0
+  );
   const loyaltyPointsEarned = Number(billing.points_earned || 0);
-  const loyaltyPointsAfter = Number(billing.customer?.loyalty_points_after ?? (loyaltyPointsBefore + loyaltyPointsEarned));
-  const hasLoyaltyPoints = billing.customer && (loyaltyPointsBefore > 0 || loyaltyPointsEarned > 0);
+  const loyaltyPointsAfter = Number(
+    billing.customer?.loyalty_points_after ?? loyaltyPointsBefore + loyaltyPointsEarned
+  );
+  const hasLoyaltyPoints =
+    !!billing.customer && (loyaltyPointsBefore > 0 || loyaltyPointsEarned > 0);
 
   const paperWidth = Number(settings.paper_width || 80);
   const bodyWidth = Math.max(paperWidth - 8, 50);
@@ -165,12 +213,11 @@ export function openBillingPrint(
         <tr>
           <td class="item-desc">
             <div class="item-name">${escapeHtml(name)}</div>
-            <div class="item-meta">${qty} x ${currency(
-        unitPrice,
-        currentStore?.currency || 'KES'
-      )} &nbsp; ${escapeHtml(vatAmountText)}(VAT)</div>
+            <div class="item-meta">
+              ${qty} x ${currency(unitPrice, storeCurrency)} &nbsp; ${escapeHtml(vatAmountText)}(VAT)
+            </div>
           </td>
-          <td class="amount-cell">${currency(total, currentStore?.currency || 'KES')}</td>
+          <td class="amount-cell">${currency(total, storeCurrency)}</td>
         </tr>
       `;
     })
@@ -179,13 +226,13 @@ export function openBillingPrint(
   const vatHtml = vatRows
     .map(
       (row) => `
-    <tr>
-      <td>${row.rate}%</td>
-      <td>${currency(row.net, store?.currency || 'KES')}</td>
-      <td>${currency(row.vat, store?.currency || 'KES')}</td>
-      <td>${currency(row.amount, store?.currency || 'KES')}</td>
-    </tr>
-  `
+        <tr>
+          <td>${row.rate}%</td>
+          <td>${currency(row.net, storeCurrency)}</td>
+          <td>${currency(row.vat, storeCurrency)}</td>
+          <td>${currency(row.amount, storeCurrency)}</td>
+        </tr>
+      `
     )
     .join('');
 
@@ -195,30 +242,30 @@ export function openBillingPrint(
       <meta charset="utf-8" />
       <title>${mode === 'invoice' ? 'Invoice Print' : 'Receipt Print'}</title>
       <style>
-@page {
-  size: ${paperWidth}mm auto;
-  margin: 2mm;
-}
+        @page {
+          size: ${paperWidth}mm auto;
+          margin: 2mm;
+        }
 
         * {
           box-sizing: border-box;
         }
 
-html, body {
-  margin: 0;
-  padding: 0;
-  background: #fff;
-  color: #000;
-  font-family: "Courier New", Courier, monospace;
-  font-size: 11px;
-  line-height: 1.3;
-}
+        html, body {
+          margin: 0;
+          padding: 0;
+          background: #fff;
+          color: #000;
+          font-family: "Courier New", Courier, monospace;
+          font-size: 11px;
+          line-height: 1.3;
+        }
 
-body {
-  width: ${bodyWidth}mm;
-  margin: 0 auto;
-  padding: 1mm 0;
-}
+        body {
+          width: ${bodyWidth}mm;
+          margin: 0 auto;
+          padding: 1mm 0;
+        }
 
         .center {
           text-align: center;
@@ -396,82 +443,89 @@ body {
       </style>
     </head>
     <body>
-<div class="center">
-  ${showLogo && store?.logo_url
-      ? `<div class="logo-wrap"><img src="${escapeHtml(store.logo_url)}" alt="Store Logo" /></div>`
-      : ''
-    }
+      <div class="center">
+        ${
+          showLogo && store?.logo_url
+            ? `<div class="logo-wrap"><img src="${escapeHtml(store.logo_url)}" alt="Store Logo" /></div>`
+            : ''
+        }
 
-  <div class="brand">${escapeHtml(store?.store_name || 'Store')}</div>
+        <div class="brand">${escapeHtml(store?.store_name || 'Store')}</div>
 
-  ${showStoreContacts && store?.location
-      ? `<div class="small">Location: ${escapeHtml(store.location)}</div>`
-      : ''
-    }
-  ${showStoreContacts && store?.telephone
-      ? `<div class="small">Tel: ${escapeHtml(store.telephone)}</div>`
-      : ''
-    }
-  ${showStoreContacts && store?.email_address
-      ? `<div class="small">Email: ${escapeHtml(store.email_address)}</div>`
-      : ''
-    }
-  ${showStorePin && store?.pin
-      ? `<div class="small">KRA PIN: ${escapeHtml(store.pin)}</div>`
-      : ''
-    }
+        ${
+          showStoreContacts && store?.location
+            ? `<div class="small">Location: ${escapeHtml(store.location)}</div>`
+            : ''
+        }
+        ${
+          showStoreContacts && store?.telephone
+            ? `<div class="small">Tel: ${escapeHtml(store.telephone)}</div>`
+            : ''
+        }
+        ${
+          showStoreContacts && store?.email_address
+            ? `<div class="small">Email: ${escapeHtml(store.email_address)}</div>`
+            : ''
+        }
+        ${
+          showStorePin && store?.pin
+            ? `<div class="small">KRA PIN: ${escapeHtml(store.pin)}</div>`
+            : ''
+        }
 
-  <div class="doc-title">${escapeHtml(documentTitle)}</div>
+        <div class="doc-title">${escapeHtml(documentTitle)}</div>
 
-  ${headerText
-      ? `<div class="header-note">${escapeHtml(headerText)}</div>`
-      : ''
-    }
-</div>
+        ${headerText ? `<div class="header-note">${escapeHtml(headerText)}</div>` : ''}
+      </div>
+
       <div class="divider"></div>
-  <div class="meta-row">
+
+      <div class="meta-row">
         <div class="label">${escapeHtml(documentLabel)}</div>
         <div class="value">${escapeHtml(documentNumber)}</div>
       </div>
 
       <div class="meta-row">
         <div class="label">Date</div>
-    <div class="value">${escapeHtml(
-      formatDateTime(payment?.payment_date || billing.billing_date || new Date().toISOString())
-    )}</div>
+        <div class="value">${escapeHtml(
+          formatDateTime(payment?.payment_date || billing.billing_date || new Date().toISOString())
+        )}</div>
       </div>
 
-      ${showCustomer
-      ? `
-          <div class="meta-row">
-            <div class="label">Customer</div>
-            <div class="value">${escapeHtml(
-        billing.customer?.full_name || 'Walk-in Customer'
-      )}</div>
-          </div>
-        `
-      : ''
-    }
+      ${
+        showCustomer
+          ? `
+            <div class="meta-row">
+              <div class="label">Customer</div>
+              <div class="value">${escapeHtml(
+                billing.customer?.full_name || 'Walk-in Customer'
+              )}</div>
+            </div>
+          `
+          : ''
+      }
 
-      ${showCashier
-      ? `
-          <div class="meta-row">
-            <div class="label">Served By</div>
-            <div class="value">${escapeHtml(billing.user?.full_name || 'Cashier')}</div>
-          </div>
-        `
-      : ''
-    }
+      ${
+        showCashier
+          ? `
+            <div class="meta-row">
+              <div class="label">Served By</div>
+              <div class="value">${escapeHtml(billing.user?.full_name || 'Cashier')}</div>
+            </div>
+          `
+          : ''
+      }
 
-      ${showPaymentMethod && payment?.payment_method
-      ? `
-          <div class="meta-row">
-            <div class="label">Payment</div>
-            <div class="value">${escapeHtml(String(payment.payment_method).toUpperCase())}</div>
-          </div>
-        `
-      : ''
-    }
+      ${
+        showPaymentMethod && payment?.payment_method
+          ? `
+            <div class="meta-row">
+              <div class="label">Payment</div>
+              <div class="value">${escapeHtml(String(payment.payment_method).toUpperCase())}</div>
+            </div>
+          `
+          : ''
+      }
 
       <div class="divider"></div>
 
@@ -492,137 +546,156 @@ body {
       <div class="totals">
         <div class="line-row">
           <div class="label">Net Amount</div>
-          <div class="value">${currency(netAmount, currentStore?.currency || 'KES')}</div>
+          <div class="value">${currency(netAmount, storeCurrency)}</div>
         </div>
 
         <div class="line-row">
           <div class="label">VAT Amount</div>
-          <div class="value">${currency(vatAmount, currentStore?.currency || 'KES')}</div>
+          <div class="value">${currency(vatAmount, storeCurrency)}</div>
         </div>
-          ${pointsDiscount > 0 ? `           <!-- ← ADD THIS BLOCK -->
-        <div class="line-row">
-          <div class="label">Points Discount</div>
-          <div class="value">- ${currency(pointsDiscount, currentStore?.currency || 'KES')}</div>
-        </div>
-        ` : ''}
+
+        ${
+          pointsDiscount > 0
+            ? `
+              <div class="line-row">
+                <div class="label">Points Discount</div>
+                <div class="value">- ${currency(pointsDiscount, storeCurrency)}</div>
+              </div>
+            `
+            : ''
+        }
 
         <div class="grand-total">
           <div class="total-row">
             <div class="label"><strong>Total</strong></div>
-            <div class="value"><strong>${currency(totalAmount, currentStore?.currency || 'KES')}</strong></div>
+            <div class="value"><strong>${currency(totalAmount, storeCurrency)}</strong></div>
           </div>
         </div>
 
         <div class="line-row">
           <div class="label">Paid</div>
-          <div class="value">${currency(paidAmount, currentStore?.currency || 'KES')}</div>
+          <div class="value">${currency(paidAmount, storeCurrency)}</div>
         </div>
 
         <div class="line-row">
           <div class="label">Balance Due</div>
-          <div class="value">${currency(balanceDue, currentStore?.currency || 'KES')}</div>
+          <div class="value">${currency(balanceDue, storeCurrency)}</div>
         </div>
 
-        ${payment?.change_returned
-      ? `
-            <div class="line-row">
-              <div class="label">Change</div>
-              <div class="value">${currency(payment.change_returned, currentStore?.currency || 'KES')}</div>
+        ${
+          payment?.change_returned
+            ? `
+              <div class="line-row">
+                <div class="label">Change</div>
+                <div class="value">${currency(payment.change_returned, storeCurrency)}</div>
+              </div>
+            `
+            : ''
+        }
+
+        ${
+          showVatSummary && vatRows.length
+            ? `
+              <table class="vat-table">
+                <thead>
+                  <tr>
+                    <th>VAT%</th>
+                    <th>Net</th>
+                    <th>VAT</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${vatHtml}
+                </tbody>
+              </table>
+            `
+            : ''
+        }
+      </div>
+
+      ${
+        hasLoyaltyPoints
+          ? `
+            <div class="divider"></div>
+            <div style="font-size:11px; text-align:center;">
+              ${
+                loyaltyPointsEarned > 0
+                  ? `
+                    <div class="line-row">
+                      <div class="label">Points Earned</div>
+                      <div class="value">+ ${loyaltyPointsEarned.toLocaleString()} pts</div>
+                    </div>
+                  `
+                  : ''
+              }
+
+              <div style="
+                border-top: 1px solid #000;
+                border-bottom: 1px solid #000;
+                padding: 4px 0;
+                margin: 4px 0;
+              ">
+                <div class="line-row" style="font-weight:700;">
+                  <div class="label">LOYALTY POINTS</div>
+                  <div class="value">${loyaltyPointsAfter.toLocaleString()} pts</div>
+                </div>
+                <div class="line-row" style="font-size:11px;">
+                  <div class="label">Est. Value (${storeCurrency})</div>
+                  <div class="value">${currency(loyaltyPointsAfter, storeCurrency)}</div>
+                </div>
+              </div>
             </div>
           `
-      : ''
-    }
-
-      ${showVatSummary && vatRows.length
-      ? `
-          <table class="vat-table">
-            <thead>
-              <tr>
-                <th>VAT%</th>
-                <th>Net</th>
-                <th>VAT</th>
-                <th>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${vatHtml}
-            </tbody>
-          </table>
-        `
-      : ''
-    }
-
-          </div>
-      ${hasLoyaltyPoints ? `
-  <div class="divider"></div>
-  <div style="font-size:11px; text-align:center;">
-     ${loyaltyPointsEarned > 0 ? `
-    <div class="line-row">
-      <div class="label">Points Earned</div>
-      <div class="value">+ ${loyaltyPointsEarned.toLocaleString()} pts</div>
-    </div>` : ''}
-    <div style="
-      border-top: 1px solid #000;
-      border-bottom: 1px solid #000;
-      padding: 4px 0;
-      margin: 4px 0;
-    ">
-      <div class="line-row" style="font-weight:700;">
-        <div class="label">LOYALTY POINTS</div>
-        <div class="value">${loyaltyPointsAfter.toLocaleString()} pts</div>
-      </div>
-      <div class="line-row" style="font-size:11px;">
-        <div class="label">Est. Value (${store?.currency || 'KES'})</div>
-        <div class="value">${currency(loyaltyPointsAfter, store?.currency || 'KES')}</div>
-      </div>
-    </div>
-  </div>
-` : ''}
-      
+          : ''
+      }
 
       <div class="divider"></div>
 
       <div class="footer-note">${escapeHtml(footerText)}</div>
-      ${billing.notes
-      ? `<div class="footer-note">${escapeHtml(billing.notes)}</div>`
-      : ''
-    }
+      ${
+        billing.notes ? `<div class="footer-note">${escapeHtml(billing.notes)}</div>` : ''
+      }
 
-      ${showBarcode || showQrCode
-      ? `
-          <div class="codes-wrap">
-                      ${showQrCode
-        ? `
-                <div class="qrcode-wrap">
-                  <img id="receipt-qrcode" class="qrcode-image" alt="QR Code" />
-                </div>
-              `
-        : ''
+      ${
+        showBarcode || showQrCode
+          ? `
+            <div class="codes-wrap">
+              ${
+                showQrCode
+                  ? `
+                    <div class="qrcode-wrap">
+                      <img id="receipt-qrcode" class="qrcode-image" alt="QR Code" />
+                    </div>
+                  `
+                  : ''
+              }
+
+              ${
+                showBarcode
+                  ? `
+                    <div class="barcode-wrap">
+                      <svg id="receipt-barcode"></svg>
+                      <div class="barcode-text">${escapeHtml(barcodeValue)}</div>
+                    </div>
+                  `
+                  : ''
+              }
+            </div>
+          `
+          : ''
       }
-            ${showBarcode
-        ? `
-                <div class="barcode-wrap">
-                  <svg id="receipt-barcode"></svg>
-                  <div class="barcode-text">${escapeHtml(barcodeValue)}</div>
-                </div>
-              `
-        : ''
-      }
-          </div>
-        `
-      : ''
-    }
     </body>
   </html>`;
 
-  const printWindow = window.open('', '_blank', 'width=320,height=900');
+  const printWindow = getUsablePrintWindow(existingWindow, 'width=320,height=900');
   if (!printWindow) return;
 
   printWindow.document.open();
   printWindow.document.write(html);
   printWindow.document.close();
 
-  printWindow.onload = async () => {
+  const renderCodesAndPrint = async () => {
     try {
       const svg = printWindow.document.getElementById('receipt-barcode');
       const qrImage = printWindow.document.getElementById('receipt-qrcode');
@@ -649,37 +722,44 @@ body {
       console.error('Print code generation failed:', error);
     }
 
-    setTimeout(() => {
-      printWindow.focus();
-      printWindow.print();
-    }, Number(settings.print_delay_ms || 300));
+    triggerPrint(printWindow, Number(settings.print_delay_ms || 300), false);
   };
+
+  runWhenDocumentReady(printWindow, () => {
+    void renderCodesAndPrint();
+  });
 }
+
 export function openZReportPrint(report) {
   if (!report) return;
 
   const cur = report.currency;
   const variance = report.variance;
   const isShort = variance !== null && variance < 0;
-  const isOver  = variance !== null && variance > 0;
+  const isOver = variance !== null && variance > 0;
 
   const varianceLabel =
     variance === null
       ? 'N/A'
       : isShort
-      ? `SHORT (-${cur} ${Math.abs(variance).toFixed(2)})`
-      : isOver
-      ? `OVER (+${cur} ${variance.toFixed(2)})`
-      : `BALANCED (${cur} 0.00)`;
+        ? `SHORT (-${cur} ${Math.abs(variance).toFixed(2)})`
+        : isOver
+          ? `OVER (+${cur} ${variance.toFixed(2)})`
+          : `BALANCED (${cur} 0.00)`;
 
   const varianceColor = isShort ? '#c0392b' : isOver ? '#e67e22' : '#27ae60';
 
   const paymentRowsHtml = report.payment_breakdown?.length
-    ? report.payment_breakdown.map(pm => `
-        <div class="line-row">
-          <div class="label">${pm.method} <span class="dim">(${pm.count} txn)</span></div>
-          <div class="value">${cur} ${pm.amount.toFixed(2)}</div>
-        </div>`).join('')
+    ? report.payment_breakdown
+        .map(
+          (pm) => `
+            <div class="line-row">
+              <div class="label">${pm.method} <span class="dim">(${pm.count} txn)</span></div>
+              <div class="value">${cur} ${pm.amount.toFixed(2)}</div>
+            </div>
+          `
+        )
+        .join('')
     : '<div class="dim">No payment data</div>';
 
   const html = `<!DOCTYPE html>
@@ -745,8 +825,11 @@ export function openZReportPrint(report) {
 
       <div class="section-title">Drawer Reconciliation</div>
       <div class="line-row"><div class="label">Expected Cash</div><div class="value">${cur} ${report.expected_cash.toFixed(2)}</div></div>
-      ${report.counted_cash !== null ? `
-      <div class="line-row"><div class="label">Counted Cash</div><div class="value">${cur} ${report.counted_cash.toFixed(2)}</div></div>` : ''}
+      ${
+        report.counted_cash !== null
+          ? `<div class="line-row"><div class="label">Counted Cash</div><div class="value">${cur} ${report.counted_cash.toFixed(2)}</div></div>`
+          : ''
+      }
       <div class="variance-row">
         <div class="line-row"><div class="label">Variance</div><div class="value">${varianceLabel}</div></div>
       </div>
@@ -758,18 +841,14 @@ export function openZReportPrint(report) {
     </body>
   </html>`;
 
-  const printWindow = window.open('', '_blank', 'width=400,height=900');
+  const printWindow = getUsablePrintWindow(null, 'width=400,height=900');
   if (!printWindow) return;
 
   printWindow.document.open();
   printWindow.document.write(html);
   printWindow.document.close();
 
-  printWindow.onload = () => {
-    setTimeout(() => {
-      printWindow.focus();
-      printWindow.print();
-      printWindow.close();
-    }, 300);
-  };
+  runWhenDocumentReady(printWindow, () => {
+    triggerPrint(printWindow, 300, true);
+  });
 }

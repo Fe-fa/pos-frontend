@@ -1,3 +1,4 @@
+
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { authService } from '../../services/authService';
@@ -27,10 +28,21 @@ export default function VerifyEmailPage() {
     setError('');
     setSubmitting(true);
     try {
+      // 1. Verify the code
       await authService.verifyEmailCode({ code });
+
+      // 2. Remove the pending-verification flag BEFORE fetching /me
+      //    so the AuthContext bootstrap (and ProtectedRoute) sees a clean state
+      localStorage.removeItem(storageKeys.pendingVerification);
+
+      // 3. Fetch fresh profile
       const meResponse = await authService.me();
+
+      // 4. Persist & surface the user
       writeJSON(storageKeys.user, meResponse.user);
       setUser(meResponse.user);
+
+      // 5. Navigate home
       navigate(getUserHomePath(meResponse.user), { replace: true });
     } catch (err) {
       setError(

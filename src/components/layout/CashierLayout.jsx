@@ -32,7 +32,7 @@ export default function CashierLayout() {
 
   return (
     <div className="cashier-shell">
-      <header className="cashier-topbar">
+      <header className="cashier-topbar" >
         <div className="brand-inline">
           <div className="brand-logo">
             {activeStore?.logo_url ? (
@@ -80,8 +80,6 @@ export default function CashierLayout() {
               </span>
             </div>
           </div>
-
-          {/* Back to panel — admin goes to /admin/dashboard, manager to /admin/manager */}
           {canGoBack && (
             <button
               type="button"

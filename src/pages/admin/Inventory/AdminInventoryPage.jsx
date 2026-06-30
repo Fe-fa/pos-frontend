@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useMutation,
   useQuery,
@@ -48,15 +48,45 @@ function AdminInventoryPageContent() {
   // Tracks rows queued for sequential bulk restock/adjust
   const bulkQueueRef = useRef({ rows: [], mode: null, index: 0 });
 
-  const debouncedSearch = useDebouncedValue(ui.search, 300);
+  // Inventory search
+  const debouncedInventorySearch = useDebouncedValue(ui.search, 300);
+
+  // Dedicated history searches
+  const [historySearch, setHistorySearch] = useState('');
+  const [modalHistorySearch, setModalHistorySearch] = useState('');
+
+  // Description / reason field used by modal
+  const [modalDescription, setModalDescription] = useState('');
+
+  // Stock level filter: 'all' | 'below' | 'above' (relative to reorder level)
+  const [reorderFilter, setReorderFilter] = useState('all');
+
+  const debouncedHistorySearch = useDebouncedValue(historySearch, 300);
+  const debouncedModalHistorySearch = useDebouncedValue(modalHistorySearch, 300);
 
   useEffect(() => {
     ui.resetForStoreChange();
+    setHistorySearch('');
+    setModalHistorySearch('');
+    setModalDescription('');
+    setReorderFilter('all');
   }, [storeId, ui.resetForStoreChange]);
+
+  useEffect(() => {
+    if (!ui.showModal) {
+      setModalHistorySearch('');
+      setModalDescription('');
+      return;
+    }
+
+    // reset when switching modal row/mode
+    setModalHistorySearch('');
+    setModalDescription('');
+  }, [ui.showModal, ui.editingId, ui.modalMode]);
 
   // ── inventory list query ──────────────────────────────────────────────────
   const inventoryQuery = useQuery({
-    queryKey: ['inventory', storeId, ui.inventoryPage, ui.pageSize, debouncedSearch],
+    queryKey: ['inventory', storeId, ui.inventoryPage, ui.pageSize, debouncedInventorySearch],
     enabled: Boolean(storeId),
     placeholderData: sameStorePlaceholder(storeId),
     queryFn: ({ signal }) =>
@@ -65,7 +95,7 @@ function AdminInventoryPageContent() {
           store_id: storeId,
           page: ui.inventoryPage,
           ...(ui.pageSize !== null ? { per_page: ui.pageSize } : {}),
-          ...(debouncedSearch ? { search: debouncedSearch } : {}),
+          ...(debouncedInventorySearch ? { search: debouncedInventorySearch } : {}),
         },
         { signal }
       ),
@@ -80,7 +110,7 @@ function AdminInventoryPageContent() {
 
   // ── history query ─────────────────────────────────────────────────────────
   const historyQuery = useQuery({
-    queryKey: ['inventory-history', storeId, ui.historyPage, ui.historyPageSize, debouncedSearch],
+    queryKey: ['inventory-history', storeId, ui.historyPage, ui.historyPageSize, debouncedHistorySearch],
     enabled: Boolean(storeId),
     placeholderData: sameStorePlaceholder(storeId),
     queryFn: ({ signal }) =>
@@ -89,7 +119,7 @@ function AdminInventoryPageContent() {
           store_id: storeId,
           page: ui.historyPage,
           ...(ui.historyPageSize !== null ? { per_page: ui.historyPageSize } : {}),
-          ...(debouncedSearch ? { search: debouncedSearch } : {}),
+          ...(debouncedHistorySearch ? { search: debouncedHistorySearch } : {}),
         },
         { signal }
       ),
@@ -112,12 +142,55 @@ function AdminInventoryPageContent() {
     select: extractList,
   });
 
+// ── modal history query ───────────────────────────────────────────────────
+const modalHistoryQuery = useQuery({
+  queryKey: [
+    'inventory-history',
+    storeId,
+    ui.editingId,
+    ui.editingRow?.product?.product_id,   // ← add product_id to key
+    ui.modalMode,
+    debouncedModalHistorySearch,
+    'modal',
+  ],
+  enabled: Boolean(
+    storeId &&
+    ui.showModal &&
+    ui.editingId &&
+    (ui.modalMode === 'edit' || ui.modalMode === 'restock' || ui.modalMode === 'adjust')
+  ),
+  staleTime: 30_000,
+  queryFn: ({ signal }) =>
+    inventoryService.history(
+      {
+        store_id: storeId,
+        product_id: ui.editingRow?.product?.product_id,  // ← swap inventory_id → product_id
+        ...(debouncedModalHistorySearch ? { search: debouncedModalHistorySearch } : {}),
+      },
+      { signal }
+    ),
+  select: (response) => toPaginatedResult(response),
+});
+
   // ── derived values ────────────────────────────────────────────────────────
-  const inventoryRows = inventoryQuery.data?.rows || [];
+  const rawInventoryRows = inventoryQuery.data?.rows || [];
   const inventoryPagination = inventoryQuery.data?.pagination || { ...EMPTY_META };
   const historyRows = historyQuery.data?.rows || [];
   const historyPagination = historyQuery.data?.pagination || { ...EMPTY_META };
+  const modalHistoryRows = modalHistoryQuery.data?.rows || [];
   const products = productsQuery.data || [];
+
+  // ── reorder-level filtering (client-side, applied to current page) ────────
+  const inventoryRows = useMemo(() => {
+    if (reorderFilter === 'all') return rawInventoryRows;
+
+    return rawInventoryRows.filter((row) => {
+      const quantity = Number(row.quantity || 0);
+      const reorder = Number(row.reorder_level || 0);
+      const isBelow = quantity <= reorder;
+      return reorderFilter === 'below' ? isBelow : !isBelow;
+    });
+  }, [rawInventoryRows, reorderFilter]);
 
   const totalSkus = inventoryPagination.total || 0;
 
@@ -157,14 +230,16 @@ function AdminInventoryPageContent() {
     if (ui.formError) return ui.formError;
     if (productsQuery.isError)
       return getErrorMessage(productsQuery.error, 'Unable to load products.');
+    if (modalHistoryQuery.isError)
+      return getErrorMessage(modalHistoryQuery.error, 'Unable to load layer history.');
     return '';
-  }, [ui.formError, productsQuery.isError, productsQuery.error]);
+  }, [ui.formError, productsQuery.isError, productsQuery.error, modalHistoryQuery.isError, modalHistoryQuery.error]);
 
   // ── mutations ─────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
     mutationFn: async ({ inventoryId, payload, mode }) => {
-      if (!inventoryId)        return inventoryService.create(payload);
-      if (mode === 'adjust')   return inventoryService.adjust(inventoryId, payload);
+      if (!inventoryId)      return inventoryService.create(payload);
+      if (mode === 'adjust') return inventoryService.adjust(inventoryId, payload);
       return inventoryService.update(inventoryId, payload); // 'restock' + 'edit'
     },
     onSuccess: async () => {
@@ -173,7 +248,6 @@ function AdminInventoryPageContent() {
         queryClient.invalidateQueries({ queryKey: ['inventory-history', storeId] }),
       ]);
 
-      // Advance bulk queue if one is active
       const queue = bulkQueueRef.current;
       const nextIndex = queue.index + 1;
 
@@ -181,7 +255,6 @@ function AdminInventoryPageContent() {
         bulkQueueRef.current = { ...queue, index: nextIndex };
         ui.openEditModal(queue.rows[nextIndex], queue.mode);
       } else {
-        // Queue done or single-item save — close and clean up
         bulkQueueRef.current = { rows: [], mode: null, index: 0 };
         ui.setShowModal(false);
         ui.resetForm();
@@ -223,10 +296,25 @@ function AdminInventoryPageContent() {
     (e) => {
       ui.setSearch(e.target.value);
       ui.setInventoryPage(1);
+    },
+    [ui.setSearch, ui.setInventoryPage]
+  );
+
+  const handleHistorySearchChange = useCallback(
+    (e) => {
+      setHistorySearch(e.target.value);
       ui.setHistoryPage(1);
     },
-    [ui.setSearch, ui.setInventoryPage, ui.setHistoryPage]
+    [ui.setHistoryPage]
   );
+
+  const handleModalHistorySearchChange = useCallback((e) => {
+    setModalHistorySearch(e.target.value);
+  }, []);
+
+  const handleReorderFilterChange = useCallback((e) => {
+    setReorderFilter(e.target.value);
+  }, []);
 
   const handlePageSizeChange = useCallback(
     (e) => {
@@ -293,7 +381,6 @@ function AdminInventoryPageContent() {
         return;
       }
 
-      // restock / adjust — open modal sequentially for each selected row
       const mode = action; // 'restock' | 'adjust'
       const rows = inventoryRows.filter((r) => ids.includes(r.inventory_id));
       if (!rows.length) return;
@@ -312,14 +399,16 @@ function AdminInventoryPageContent() {
       ui.setFormError('');
 
       const mode = ui.modalMode;
+      const reason = modalDescription.trim() || null;
 
-      // edit — no quantity, only batch_no + reorder_level
+      // edit — no quantity, only batch_no + reorder_level + description
       if (mode === 'edit') {
         const payload = {
-          store_id:      Number(storeId),
-          product_id:    Number(ui.form.product_id),
-          batch_no:      ui.form.batch_no.trim(),
+          store_id: Number(storeId),
+          product_id: Number(ui.form.product_id),
+          batch_no: ui.form.batch_no.trim(),
           reorder_level: Number(ui.form.reorder_level || 0),
+          ...(reason ? { reason } : {}),
         };
         saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
         return;
@@ -333,8 +422,9 @@ function AdminInventoryPageContent() {
           return;
         }
         const payload = {
-          quantity:      delta,
+          quantity: delta,
           reorder_level: Number(ui.form.reorder_level || 0),
+          ...(reason ? { reason } : {}),
         };
         saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
         return;
@@ -347,15 +437,16 @@ function AdminInventoryPageContent() {
         return;
       }
       const payload = {
-        store_id:      Number(storeId),
-        product_id:    Number(ui.form.product_id),
-        batch_no:      ui.form.batch_no.trim(),
-        quantity:      qty,
+        store_id: Number(storeId),
+        product_id: Number(ui.form.product_id),
+        batch_no: ui.form.batch_no.trim(),
+        quantity: qty,
         reorder_level: Number(ui.form.reorder_level || 0),
+        ...(reason ? { reason } : {}),
       };
       saveMutation.mutate({ inventoryId: ui.editingId, payload, mode });
     },
-    [storeId, ui, saveMutation]
+    [storeId, ui, saveMutation, modalDescription]
   );
 
   const handleDelete = useCallback(
@@ -398,6 +489,101 @@ function AdminInventoryPageContent() {
     [inventoryRows, storeId]
   );
 
+  // ── Print report handler ──────────────────────────────────────────────────
+  const handlePrintReport = useCallback(() => {
+    const escapeHtml = (val) =>
+      String(val ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[c]));
+
+    const rowsHtml = inventoryRows
+      .map((row) => {
+        const status = getInventoryStatus(row);
+        return `
+          <tr>
+            <td>${escapeHtml(row.product?.product_name || 'Unknown product')}</td>
+            <td>${escapeHtml(row.product?.sku || '')}</td>
+            <td>${escapeHtml(row.product?.category?.category_name || '')}</td>
+            <td>${escapeHtml(row.batch_no || '—')}</td>
+            <td>${escapeHtml(row.quantity)}</td>
+            <td>${escapeHtml(row.reorder_level || 0)}</td>
+            <td>${escapeHtml(status.label)}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    const filterLabel =
+      reorderFilter === 'below'
+        ? 'Below Reorder Level (Low Stock)'
+        : reorderFilter === 'above'
+        ? 'Above Reorder Level (Healthy)'
+        : 'All Items';
+
+    const printWindow = window.open('', '_blank', 'width=900,height=700');
+    if (!printWindow) {
+      window.alert('Please allow pop-ups to print the inventory report.');
+      return;
+    }
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Inventory Report — Store ${escapeHtml(storeId || '-')}</title>
+          <meta charset="utf-8" />
+          <style>
+            * { box-sizing: border-box; }
+            body { font-family: Arial, Helvetica, sans-serif; margin: 24px; color: #111; }
+            h1 { font-size: 20px; margin-bottom: 4px; }
+            .meta { font-size: 12px; color: #555; margin-bottom: 16px; }
+            table { width: 100%; border-collapse: collapse; font-size: 12px; }
+            th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+            th { background: #f3f4f6; }
+            tfoot td { font-weight: bold; }
+            @media print {
+              body { margin: 0.5in; }
+            }
+          </style>
+        </head>
+        <body>
+          <h1>Inventory Report</h1>
+          <div class="meta">
+            Store ID: ${escapeHtml(storeId || '-')} &nbsp;|&nbsp;
+            Filter: ${escapeHtml(filterLabel)} &nbsp;|&nbsp;
+            Generated: ${escapeHtml(new Date().toLocaleString())} &nbsp;|&nbsp;
+            Rows: ${inventoryRows.length}
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU</th>
+                <th>Category</th>
+                <th>Batch No</th>
+                <th>Quantity</th>
+                <th>Reorder Level</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || '<tr><td colspan="7" style="text-align:center;">No rows to display.</td></tr>'}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.onload = () => {
+      printWindow.print();
+    };
+  }, [inventoryRows, storeId, reorderFilter]);
+
   // ── render ────────────────────────────────────────────────────────────────
   return (
     <>
@@ -418,8 +604,11 @@ function AdminInventoryPageContent() {
           onPageSizeChange={handlePageSizeChange}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
           onExport={handleExport}
+          onPrint={handlePrintReport}
           onBulkAction={handleBulkAction}
           selectedCount={ui.selectedIds.size}
+          reorderFilter={reorderFilter}
+          onReorderFilterChange={handleReorderFilterChange}
         />
 
         {pageError && !ui.showModal ? <p className="form-error">{pageError}</p> : null}
@@ -453,6 +642,8 @@ function AdminInventoryPageContent() {
           pageSizeOptions={PAGE_SIZE_OPTIONS}
           onPreviousPage={handlePreviousHistoryPage}
           onNextPage={handleNextHistoryPage}
+          search={historySearch}
+          onSearchChange={handleHistorySearchChange}
         />
       </section>
 
@@ -470,6 +661,13 @@ function AdminInventoryPageContent() {
           canManage={canManage}
           onSubmit={handleSubmit}
           onClose={ui.closeModal}
+          editingRow={ui.editingRow}
+          recentHistory={modalHistoryRows}
+          historyLoading={modalHistoryQuery.isFetching}
+          historySearch={modalHistorySearch}
+          onHistorySearchChange={handleModalHistorySearchChange}
+          description={modalDescription}
+          onDescriptionChange={setModalDescription}
         />
       ) : null}
     </>

@@ -1,5 +1,5 @@
 import { memo, useState, useRef, useEffect, useCallback } from 'react';
-import { Plus, Search, Download, ChevronDown } from 'lucide-react';
+import { Plus, Search, Download, ChevronDown, Printer } from 'lucide-react';
 import Spinner from './Spinner';
 
 const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
@@ -18,8 +18,11 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
   onPageSizeChange,
   pageSizeOptions,
   onExport,
+  onPrint,       // ← NEW: print report handler
   onBulkAction,   // ← NEW: delegate bulk actions to parent
   selectedCount,  // ← NEW: drives the badge on the Bulk Actions button
+  reorderFilter,        // ← NEW: 'all' | 'below' | 'above'
+  onReorderFilterChange, // ← NEW
 }) {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -114,12 +117,12 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           </strong>
         </div>
 
-        <div className="inv-stat-card inv-branch-card">
+        {/* <div className="inv-stat-card inv-branch-card">
           <p className="inv-stat-label">Branch Select</p>
           <select className="select-input inv-branch-select" defaultValue="">
             <option value="">Branch Select</option>
           </select>
-        </div>
+        </div> */}
       </div>
 
       {/* ── Search / filter toolbar ── */}
@@ -153,6 +156,24 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
           ))}
         </div>
 
+        {/* ── NEW: Stock level filter (relative to reorder level) ── */}
+        <div className="filter-group">
+          <label className="muted text-xs" htmlFor="inv-reorder-filter" style={{ marginRight: 6 }}>
+            Stock Level:
+          </label>
+          <select
+            id="inv-reorder-filter"
+            value={reorderFilter}
+            onChange={onReorderFilterChange}
+            className="pos-dropdown-select select-input"
+            disabled={!storeId}
+          >
+            <option value="all">All Items</option>
+            <option value="below">Below Reorder Level (Low Stock)</option>
+            <option value="above">Above Reorder Level (Healthy)</option>
+          </select>
+        </div>
+
         <label className="inv-show-wrap">
           <span className="muted">Show</span>
           <select
@@ -174,8 +195,6 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
         </label>
 
         <div className="inventory-store-pill">Store ID: {storeId || '-'}</div>
-
-        {/* ── UPDATED: Bulk Actions with selectedCount badge ── */}
         <div className="inv-dropdown-wrap" ref={bulkRef}>
           <button
             type="button"
@@ -228,6 +247,19 @@ const InventoryHeaderToolbar = memo(function InventoryHeaderToolbar({
             </div>
           )}
         </div>
+
+        {/* ── NEW: Print report button ── */}
+        <button
+          type="button"
+          className="ghost-button inv-print-btn"
+          onClick={() => onPrint?.()}
+          disabled={!storeId}
+          title="Print inventory report"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}
+        >
+          <Printer size={15} />
+          Print Report
+        </button>
       </div>
     </>
   );

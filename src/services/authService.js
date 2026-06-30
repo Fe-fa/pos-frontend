@@ -1,3 +1,4 @@
+
 import api from '../lib/api';
 
 export const authService = {
@@ -16,6 +17,14 @@ export const authService = {
     return response.data;
   },
 
+  // Silently refreshes the access token.
+  // The 401-interceptor in api.js calls this automatically,
+  // but AuthContext.silentRefresh() also uses it directly.
+  async refresh() {
+    const response = await api.post('/auth/refresh');
+    return response.data;
+  },
+
   async logout() {
     const response = await api.post('/auth/logout');
     return response.data;
@@ -30,13 +39,14 @@ export const authService = {
     const response = await api.post('/auth/reset-password', payload);
     return response.data;
   },
-  async verifyEmailCode(payload) {
-  const response = await api.post('/auth/verify-email', payload);
-  return response.data;
-},
 
-async resendVerification() {
-  const response = await api.post('/auth/resend-verification');
-  return response.data;
-},
+  async verifyEmailCode(payload) {
+    const response = await api.post('/auth/verify-email', payload);
+    return response.data;
+  },
+
+  async resendVerification() {
+    const response = await api.post('/auth/resend-verification');
+    return response.data;
+  },
 };

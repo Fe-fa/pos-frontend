@@ -20,6 +20,7 @@ import {
   RefreshCw,
   Smartphone,
   Wallet,
+    X, 
 } from 'lucide-react';
 import Modal from '../../components/common/Modal';
 import { useStore } from '../../contexts/StoreContext';
@@ -1029,6 +1030,17 @@ export default function AdminPaymentsPage() {
     activeRange.from,
     activeRange.to,
   ]);
+  const handleReset = useCallback(() => {
+    setSearch('');
+    setDatePreset('today');
+    setCustomRange({ from: '', to: '' });
+    setCashierFilter('');
+    setCategoryFilter('');
+    setExpandedPaymentId(null);
+    dispatch({ type: 'SET_STATUS', payload: '' });
+    dispatch({ type: 'SET_METHOD', payload: '' });
+    dispatch({ type: 'SET_PAGE', payload: 1 });
+}, []);
 
   const handleSearchChange = useCallback((event) => {
     setSearch(event.target.value);
@@ -1479,6 +1491,15 @@ const responseMeta = payload?.meta || {};
                 <RefreshCw size={15} />
                 Refresh
               </button>
+                  <button
+        type="button"
+        className="ghost-button"
+        onClick={handleReset}
+        disabled={!storeId}
+    >
+        <X size={15} />
+        Reset
+    </button>
 
               <button
                 type="button"
